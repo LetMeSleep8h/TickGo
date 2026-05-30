@@ -1,0 +1,31 @@
+package com.eighthours.tickgo.entity;
+
+import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableName;
+import lombok.Data;
+
+import java.time.LocalDateTime;
+
+@Data
+@TableName("t_train_station")
+public class TrainStationDO {
+
+    @TableId(type = IdType.AUTO)
+    private Long id;
+
+    private Long trainId;
+
+    private String stationName;
+
+    private Integer sequenceNo;
+
+    private LocalDateTime arrivalTime;
+
+    private LocalDateTime departureTime;
+
+    private LocalDateTime createTime;
+
+    private LocalDateTime updateTime;
+
+}

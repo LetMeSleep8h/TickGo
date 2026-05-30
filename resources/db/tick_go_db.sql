@@ -59,20 +59,15 @@ CREATE TABLE t_seat (
 
 CREATE TABLE t_ticket (
                           id BIGINT PRIMARY KEY AUTO_INCREMENT,
-                          ticket_sn VARCHAR(64) NOT NULL,
-                          order_sn VARCHAR(64) NULL,
                           username VARCHAR(64) NOT NULL,
                           train_id BIGINT NOT NULL,
                           carriage_number VARCHAR(16) NOT NULL,
                           seat_number VARCHAR(16) NOT NULL,
+                          passenger_id BIGINT NOT NULL COMMENT '乘车人ID',
                           seat_type TINYINT NOT NULL,
-                          departure VARCHAR(64) NOT NULL,
-                          arrival VARCHAR(64) NOT NULL,
                           ticket_status TINYINT NOT NULL DEFAULT 0 COMMENT '0待支付 1已支付 5已关闭',
                           create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                          update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                          UNIQUE KEY uk_ticket_sn (ticket_sn),
-                          KEY idx_order_sn (order_sn)
+                          update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) COMMENT='车票表';
 
 CREATE TABLE t_order (

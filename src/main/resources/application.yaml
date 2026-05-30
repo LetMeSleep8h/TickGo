@@ -29,15 +29,12 @@ spring:
 
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
-  type-aliases-package: com.eighthours.tickgo
+  type-aliases-package: com.eighthours.tickgo.entity
   configuration:
     map-underscore-to-camel-case: true
   global-config:
     db-config:
       id-type: auto
-      logic-delete-field: deleted
-      logic-delete-value: 1
-      logic-not-delete-value: 0
 
 rocketmq:
   name-server: localhost:9876
