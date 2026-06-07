@@ -56,7 +56,7 @@
         :columns="passengerColumns"
         :pagination="false"
         rowKey="id"
-        :row-selection="{ selectedRowKeys, onChange: handleSelectionChange }"
+        :row-selection="{ selectedRowKeys: selectedPassengerIds, onChange: handleSelectionChange }"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'realName'">{{ record.realName }}</template>
@@ -117,7 +117,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { getPassengers, validatePassengers } from '../api/user'
@@ -220,7 +220,7 @@ async function handleQueryTicket() {
       departure: queryForm.departure,
       arrival: queryForm.arrival
     })
-    ticketResult.value = res.data
+    ticketResult.value = res
   } catch {
     ticketResult.value = null
   } finally {
@@ -232,7 +232,7 @@ async function fetchPassengers() {
   passengersLoading.value = true
   try {
     const res = await getPassengers(userId.value)
-    passengers.value = res.data
+    passengers.value = res
     // Initialize seat map for each passenger
     passengers.value.forEach(p => {
       if (!(p.id in passengerSeatMap)) {
@@ -294,22 +294,22 @@ async function handleCreateOrder() {
       userId: userId.value,
       username: username.value,
       trainId: queryForm.trainId,
-      trainNumber: preOccupyRes.data.trainNumber,
+      trainNumber: preOccupyRes.trainNumber,
       departure: queryForm.departure,
       arrival: queryForm.arrival,
-      items: preOccupyRes.data.items
+      items: preOccupyRes.items
     })
 
     // Step 5: Save to recent order and navigate
     const recentOrder: RecentOrder = {
       orderSn,
       trainId: queryForm.trainId,
-      trainNumber: preOccupyRes.data.trainNumber,
+      trainNumber: preOccupyRes.trainNumber,
       departure: queryForm.departure,
       arrival: queryForm.arrival,
       userId: userId.value,
       username: username.value,
-      items: preOccupyRes.data.items,
+      items: preOccupyRes.items,
       frontendOrderStatus: 'PENDING'
     }
 

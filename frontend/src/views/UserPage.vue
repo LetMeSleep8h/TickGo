@@ -53,7 +53,7 @@ async function fetchUserInfo() {
   userLoading.value = true
   try {
     const res = await getUserById(userId.value)
-    userInfo.value = res.data
+    userInfo.value = res
   } catch {
     userInfo.value = null
   } finally {
@@ -65,7 +65,7 @@ async function fetchPassengers() {
   passengersLoading.value = true
   try {
     const res = await getPassengers(userId.value)
-    passengers.value = res.data
+    passengers.value = res
   } catch {
     passengers.value = []
   } finally {

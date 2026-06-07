@@ -15,7 +15,7 @@ http.interceptors.response.use(
       message.error(resp.message || '请求失败')
       return Promise.reject(new Error(resp.message || '请求失败'))
     }
-    return response
+    return resp.data
   },
   (error) => {
     if (error.response) {
