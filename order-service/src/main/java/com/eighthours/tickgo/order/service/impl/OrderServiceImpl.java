@@ -2,10 +2,10 @@ package com.eighthours.tickgo.order.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
-import com.eighthours.tickgo.common.Result;
 import com.eighthours.tickgo.enums.OrderItemStatusEnum;
 import com.eighthours.tickgo.enums.OrderStatusEnum;
 import com.eighthours.tickgo.exception.BizException;
+import com.eighthours.tickgo.order.dto.CreateOrderRequestDTO;
 import com.eighthours.tickgo.order.entity.OrderDO;
 import com.eighthours.tickgo.order.entity.OrderItemDO;
 import com.eighthours.tickgo.order.feign.TicketServiceClient;
@@ -14,6 +14,7 @@ import com.eighthours.tickgo.order.mapper.OrderMapper;
 import com.eighthours.tickgo.order.mq.OrderCancelProducer;
 import com.eighthours.tickgo.order.service.CompensationService;
 import com.eighthours.tickgo.order.service.OrderService;
+import com.eighthours.tickgo.order.ticket.Result;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -24,7 +25,6 @@ import org.springframework.util.CollectionUtils;
 
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Map;
 
 @Service
 @RequiredArgsConstructor
@@ -42,40 +42,39 @@ public class OrderServiceImpl implements OrderService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void createOrder(String orderSn, Long userId, String username, Long trainId, String trainNumber,
-                            String departure, String arrival, List<Map<String, Object>> items) {
+    public void createOrder(CreateOrderRequestDTO request) {
         OrderDO order = new OrderDO();
-        order.setOrderSn(orderSn);
-        order.setUserId(userId);
-        order.setUsername(username);
-        order.setTrainId(trainId);
-        order.setTrainNumber(trainNumber);
-        order.setDeparture(departure);
-        order.setArrival(arrival);
+        order.setOrderSn(request.getOrderSn());
+        order.setUserId(request.getUserId());
+        order.setUsername(request.getUsername());
+        order.setTrainId(request.getTrainId());
+        order.setTrainNumber(request.getTrainNumber());
+        order.setDeparture(request.getDeparture());
+        order.setArrival(request.getArrival());
         order.setStatus(OrderStatusEnum.WAIT_PAY.getCode());
         order.setOrderTime(LocalDateTime.now());
         orderMapper.insert(order);
 
-        for (Map<String, Object> item : items) {
+        for (CreateOrderRequestDTO.OrderItemDTO item : request.getItems()) {
             OrderItemDO orderItem = new OrderItemDO();
-            orderItem.setOrderSn(orderSn);
-            orderItem.setUserId(userId);
-            orderItem.setUsername(username);
-            orderItem.setTrainId(trainId);
-            orderItem.setCarriageNumber((String) item.get("carriageNumber"));
-            orderItem.setSeatNumber((String) item.get("seatNumber"));
-            orderItem.setSeatType((Integer) item.get("seatType"));
-            orderItem.setRealName("Passenger-" + item.get("passengerId"));
-            orderItem.setIdCard("MOCK-" + item.get("passengerId"));
+            orderItem.setOrderSn(request.getOrderSn());
+            orderItem.setUserId(request.getUserId());
+            orderItem.setUsername(request.getUsername());
+            orderItem.setTrainId(request.getTrainId());
+            orderItem.setCarriageNumber(item.getCarriageNumber());
+            orderItem.setSeatNumber(item.getSeatNumber());
+            orderItem.setSeatType(item.getSeatType());
+            orderItem.setRealName("Passenger-" + item.getPassengerId());
+            orderItem.setIdCard("MOCK-" + item.getPassengerId());
             orderItem.setStatus(OrderItemStatusEnum.WAIT_PAY.getCode());
-            orderItem.setAmount((Integer) item.get("amount"));
+            orderItem.setAmount(item.getAmount());
             orderItemMapper.insert(orderItem);
         }
 
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                orderCancelProducer.sendCancelDelayMessage(orderSn, 4);
+                orderCancelProducer.sendCancelDelayMessage(request.getOrderSn(), 4);
             }
         });
     }
@@ -126,7 +125,7 @@ public class OrderServiceImpl implements OrderService {
             public void afterCommit() {
                 try {
                     Result<Void> result = ticketServiceClient.confirmTickets(orderSn);
-                    if (!"0".equals(result.getCode())) {
+                    if (result.getCode() != 200) {
                         log.warn("支付后确认车票失败，orderSn={}, 开始补偿", orderSn);
                         compensationService.createCompensationTask(
                                 CompensationServiceImpl.TASK_TYPE_CONFIRM_TICKET, orderSn);
@@ -154,11 +153,7 @@ public class OrderServiceImpl implements OrderService {
             return;
         }
 
-        List<OrderItemDO> orderItems = orderItemMapper.selectList(
-                new LambdaQueryWrapper<OrderItemDO>()
-                        .eq(OrderItemDO::getOrderSn, orderSn));
-
-        int orderItemUpdated = orderItemMapper.update(null,
+        orderItemMapper.update(null,
                 new LambdaUpdateWrapper<OrderItemDO>()
                         .set(OrderItemDO::getStatus, OrderItemStatusEnum.CANCELED.getCode())
                         .eq(OrderItemDO::getOrderSn, orderSn)
@@ -179,7 +174,7 @@ public class OrderServiceImpl implements OrderService {
             public void afterCommit() {
                 try {
                     Result<Void> result = ticketServiceClient.releaseSeats(orderSn);
-                    if (!"0".equals(result.getCode())) {
+                    if (result.getCode() != 200) {
                         log.warn("取消后释放座位失败，orderSn={}, 开始补偿", orderSn);
                         compensationService.createCompensationTask(
                                 CompensationServiceImpl.TASK_TYPE_CANCEL_TICKET, orderSn);

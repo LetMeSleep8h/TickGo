@@ -1,7 +1,7 @@
 package com.eighthours.tickgo.order.mq;
 
-import com.eighthours.tickgo.dto.OrderCancelDelayMessage;
 import com.eighthours.tickgo.exception.BizException;
+import com.eighthours.tickgo.order.dto.OrderCancelDelayMessage;
 import com.eighthours.tickgo.order.service.OrderService;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.rocketmq.spring.annotation.RocketMQMessageListener;

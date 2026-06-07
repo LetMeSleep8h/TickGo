@@ -1,6 +1,6 @@
 package com.eighthours.tickgo.order.feign;
 
-import com.eighthours.tickgo.common.Result;
+import com.eighthours.tickgo.order.ticket.Result;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;

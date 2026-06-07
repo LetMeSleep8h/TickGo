@@ -1,12 +1,10 @@
 package com.eighthours.tickgo.order.service;
 
-import java.util.List;
-import java.util.Map;
+import com.eighthours.tickgo.order.dto.CreateOrderRequestDTO;
 
 public interface OrderService {
 
-    void createOrder(String orderSn, Long userId, String username, Long trainId, String trainNumber,
-                     String departure, String arrival, List<Map<String, Object>> items);
+    void createOrder(CreateOrderRequestDTO request);
 
     void payOrder(String orderSn);
 

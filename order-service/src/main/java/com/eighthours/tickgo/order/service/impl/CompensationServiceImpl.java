@@ -2,11 +2,11 @@ package com.eighthours.tickgo.order.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
-import com.eighthours.tickgo.common.Result;
 import com.eighthours.tickgo.order.entity.CompensationTask;
 import com.eighthours.tickgo.order.feign.TicketServiceClient;
 import com.eighthours.tickgo.order.mapper.CompensationTaskMapper;
 import com.eighthours.tickgo.order.service.CompensationService;
+import com.eighthours.tickgo.order.ticket.Result;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -99,10 +99,10 @@ public class CompensationServiceImpl implements CompensationService {
             switch (task.getTaskType()) {
                 case TASK_TYPE_CANCEL_TICKET:
                     Result<Void> cancelResult = ticketServiceClient.releaseSeats(task.getBizId());
-                    return "0".equals(cancelResult.getCode());
+                    return cancelResult.getCode() == 200;
                 case TASK_TYPE_CONFIRM_TICKET:
                     Result<Void> confirmResult = ticketServiceClient.confirmTickets(task.getBizId());
-                    return "0".equals(confirmResult.getCode());
+                    return confirmResult.getCode() == 200;
                 default:
                     log.warn("未知任务类型，taskType={}", task.getTaskType());
                     return true;
