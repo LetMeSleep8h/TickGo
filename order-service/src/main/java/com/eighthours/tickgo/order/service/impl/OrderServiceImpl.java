@@ -2,9 +2,9 @@ package com.eighthours.tickgo.order.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
-import com.eighthours.tickgo.enums.OrderItemStatusEnum;
-import com.eighthours.tickgo.enums.OrderStatusEnum;
-import com.eighthours.tickgo.exception.BizException;
+import com.eighthours.tickgo.order.enums.OrderItemStatusEnum;
+import com.eighthours.tickgo.order.enums.OrderStatusEnum;
+import com.eighthours.tickgo.order.exception.BizException;
 import com.eighthours.tickgo.order.dto.CreateOrderRequestDTO;
 import com.eighthours.tickgo.order.entity.OrderDO;
 import com.eighthours.tickgo.order.entity.OrderItemDO;
