@@ -1,12 +1,16 @@
 package com.eighthours.tickgo.ticket.controller;
 
+import com.eighthours.tickgo.ticket.dto.PreOccupyRequestDTO;
+import com.eighthours.tickgo.ticket.dto.SeatPreOccupyRespDTO;
+import com.eighthours.tickgo.ticket.dto.TicketQueryRespDTO;
 import com.eighthours.tickgo.ticket.common.Result;
+import com.eighthours.tickgo.ticket.exception.BizException;
 import com.eighthours.tickgo.ticket.service.TicketService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
-import java.util.Map;
+import java.util.Objects;
 
 @RestController
 @RequestMapping("/ticket")
@@ -16,29 +20,33 @@ public class TicketController {
     private final TicketService ticketService;
 
     @GetMapping("/query")
-    public Result<Map<String, Object>> queryRemainTicket(@RequestParam Long trainId,
+    public Result<TicketQueryRespDTO> queryRemainTicket(@RequestParam Long trainId,
                                                          @RequestParam String departure,
                                                          @RequestParam String arrival) {
-        Map<String, Object> data = ticketService.queryRemainTicket(trainId, departure, arrival);
+        TicketQueryRespDTO data = ticketService.queryRemainTicket(trainId, departure, arrival);
         return Result.success(data);
     }
 
     @PostMapping("/preOccupy")
-    public Result<Map<String, Object>> preOccupySeats(@RequestBody Map<String, Object> request) {
-        @SuppressWarnings("unchecked")
-        List<Map<String, Object>> passengers = (List<Map<String, Object>>) request.get("passengers");
-        List<Long> passengerIds = passengers.stream()
-                .map(p -> ((Number) p.get("passengerId")).longValue())
+    public Result<SeatPreOccupyRespDTO> preOccupySeats(@RequestBody PreOccupyRequestDTO request) {
+        if (Objects.isNull(request)) {
+            throw new BizException("乘车人不能为空");
+        }
+        if (Objects.isNull(request.getPassengers()) || request.getPassengers().isEmpty()) {
+            throw new BizException("乘车人不能为空");
+        }
+        List<Long> passengerIds = request.getPassengers().stream()
+                .map(PreOccupyRequestDTO.PassengerSeatDTO::getPassengerId)
                 .toList();
-        List<Integer> seatTypes = passengers.stream()
-                .map(p -> ((Number) p.get("seatType")).intValue())
+        List<Integer> seatTypes = request.getPassengers().stream()
+                .map(PreOccupyRequestDTO.PassengerSeatDTO::getSeatType)
                 .toList();
 
-        Map<String, Object> data = ticketService.preOccupySeats(
-                ((Number) request.get("trainId")).longValue(),
-                (String) request.get("departure"),
-                (String) request.get("arrival"),
-                (String) request.get("orderSn"),
+        SeatPreOccupyRespDTO data = ticketService.preOccupySeats(
+                request.getTrainId(),
+                request.getDeparture(),
+                request.getArrival(),
+                request.getOrderSn(),
                 passengerIds,
                 seatTypes);
         return Result.success(data);
@@ -58,9 +66,9 @@ public class TicketController {
 
     @PostMapping("/initToken")
     public Result<Void> initTicketToken(@RequestParam Long trainId,
-                                        @RequestParam String departure,
-                                        @RequestParam String arrival) {
-        ticketService.initTicketToken(trainId, departure, arrival);
+                                        @RequestParam(required = false) String departure,
+                                        @RequestParam(required = false) String arrival) {
+        ticketService.initTicketToken(trainId);
         return Result.success();
     }
 }

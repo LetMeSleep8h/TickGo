@@ -2,12 +2,12 @@ package com.eighthours.tickgo.ticket.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
-import com.eighthours.tickgo.dto.SeatItemDTO;
-import com.eighthours.tickgo.dto.SeatPreOccupyRespDTO;
-import com.eighthours.tickgo.dto.SeatTypeRemainDTO;
-import com.eighthours.tickgo.dto.TicketQueryRespDTO;
-import com.eighthours.tickgo.enums.TicketStatusEnum;
-import com.eighthours.tickgo.exception.BizException;
+import com.eighthours.tickgo.ticket.dto.SeatItemDTO;
+import com.eighthours.tickgo.ticket.dto.SeatPreOccupyRespDTO;
+import com.eighthours.tickgo.ticket.dto.SeatTypeRemainDTO;
+import com.eighthours.tickgo.ticket.dto.TicketQueryRespDTO;
+import com.eighthours.tickgo.ticket.enums.TicketStatusEnum;
+import com.eighthours.tickgo.ticket.exception.BizException;
 import com.eighthours.tickgo.ticket.entity.SeatDO;
 import com.eighthours.tickgo.ticket.entity.TicketDO;
 import com.eighthours.tickgo.ticket.entity.TrainDO;
@@ -34,6 +34,7 @@ import java.util.stream.Collectors;
 public class TicketServiceImpl implements TicketService {
 
     private static final String USERNAME = "admin";
+    private static final String TOKEN_NOT_INITIALIZED = "TOKEN_NOT_INITIALIZED";
 
     private final TrainStationMapper trainStationMapper;
     private final TrainMapper trainMapper;
@@ -51,25 +52,17 @@ public class TicketServiceImpl implements TicketService {
     }
 
     @Override
-    public void initTicketToken(Long trainId, String departure, String arrival) {
-        List<Integer> allSeatTypes = seatMapper.selectList(
-                        new LambdaQueryWrapper<SeatDO>()
-                                .eq(SeatDO::getTrainId, trainId)
-                                .select(SeatDO::getSeatType)
-                                .groupBy(SeatDO::getSeatType))
-                .stream()
-                .map(SeatDO::getSeatType)
-                .collect(Collectors.toList());
+    public void initTicketToken(Long trainId) {
+        List<TrainStationDO> stations = loadTrainStations(trainId);
+        List<Integer> allSeatTypes = loadAllSeatTypes(trainId);
+        if (allSeatTypes.isEmpty()) {
+            return;
+        }
 
-        TicketQueryRespDTO resp = queryRemainTicket(trainId, departure, arrival);
-
-        Map<Integer, Long> remainCountMap = resp.getSeatTypeRemains().stream()
-                .collect(Collectors.toMap(SeatTypeRemainDTO::getSeatType, SeatTypeRemainDTO::getRemainCount));
-
-        for (Integer seatType : allSeatTypes) {
-            Long remainCount = remainCountMap.getOrDefault(seatType, 0L);
-            String key = buildTokenKey(trainId, departure, arrival, seatType);
-            stringRedisTemplate.opsForValue().set(key, String.valueOf(remainCount));
+        for (int i = 0; i < stations.size() - 1; i++) {
+            for (int j = i + 1; j < stations.size(); j++) {
+                refreshIntervalToken(trainId, stations.get(i).getStationName(), stations.get(j).getStationName(), allSeatTypes);
+            }
         }
     }
 
@@ -112,6 +105,10 @@ public class TicketServiceImpl implements TicketService {
                 Integer seatType = entry.getKey();
                 Integer count = entry.getValue();
                 String key = buildTokenKey(trainId, departure, arrival, seatType);
+                String tokenValue = stringRedisTemplate.opsForValue().get(key);
+                if (tokenValue == null) {
+                    throw new BizException(TOKEN_NOT_INITIALIZED, "余票令牌未初始化，请先刷新当前车次余票");
+                }
 
                 Long token = stringRedisTemplate.opsForValue().decrement(key, count);
                 if (token == null || token < 0) {
@@ -172,6 +169,7 @@ public class TicketServiceImpl implements TicketService {
                     }
                 }
             }
+            initTicketToken(trainId);
 
             SeatPreOccupyRespDTO response = new SeatPreOccupyRespDTO();
             response.setTrainNumber(train.getTrainNumber());
@@ -270,9 +268,9 @@ public class TicketServiceImpl implements TicketService {
                                     .set(TicketDO::getTicketStatus, TicketStatusEnum.CANCELED.getCode())
                                     .eq(TicketDO::getId, ticket.getId()));
                 }
-
-                String tokenKey = buildTokenKey(trainId, departure, arrival, seatType);
-                stringRedisTemplate.opsForValue().increment(tokenKey, sameTypeTickets.size());
+                initTicketToken(trainId);
+//                String tokenKey = buildTokenKey(trainId, departure, arrival, seatType);
+//                stringRedisTemplate.opsForValue().increment(tokenKey, sameTypeTickets.size());
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new BizException("释放座位过程被中断，请稍后重试");
@@ -304,6 +302,41 @@ public class TicketServiceImpl implements TicketService {
         }
 
         return new StationSegment(departureSequence, arrivalSequence, arrivalSequence - departureSequence);
+    }
+
+    private List<TrainStationDO> loadTrainStations(Long trainId) {
+        List<TrainStationDO> stations = trainStationMapper.selectList(
+                new LambdaQueryWrapper<TrainStationDO>()
+                        .eq(TrainStationDO::getTrainId, trainId)
+                        .orderByAsc(TrainStationDO::getSequenceNo));
+        if (stations.size() < 2) {
+            throw new BizException("车次站点不存在");
+        }
+        return stations;
+    }
+
+    private List<Integer> loadAllSeatTypes(Long trainId) {
+        return seatMapper.selectList(
+                        new LambdaQueryWrapper<SeatDO>()
+                                .eq(SeatDO::getTrainId, trainId)
+                                .select(SeatDO::getSeatType)
+                                .groupBy(SeatDO::getSeatType))
+                .stream()
+                .map(SeatDO::getSeatType)
+                .collect(Collectors.toList());
+    }
+
+    private void refreshIntervalToken(Long trainId, String departure, String arrival, List<Integer> allSeatTypes) {
+        TicketQueryRespDTO resp = queryRemainTicket(trainId, departure, arrival);
+
+        Map<Integer, Long> remainCountMap = resp.getSeatTypeRemains().stream()
+                .collect(Collectors.toMap(SeatTypeRemainDTO::getSeatType, SeatTypeRemainDTO::getRemainCount));
+
+        for (Integer seatType : allSeatTypes) {
+            Long remainCount = remainCountMap.getOrDefault(seatType, 0L);
+            String key = buildTokenKey(trainId, departure, arrival, seatType);
+            stringRedisTemplate.opsForValue().set(key, String.valueOf(remainCount));
+        }
     }
 
     private List<SeatTypeRemainDTO> countSeatTypeRemains(Long trainId,
