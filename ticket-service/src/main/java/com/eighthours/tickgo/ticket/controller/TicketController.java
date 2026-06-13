@@ -4,6 +4,8 @@ import com.eighthours.tickgo.ticket.dto.PreOccupyRequestDTO;
 import com.eighthours.tickgo.ticket.dto.SeatPreOccupyRespDTO;
 import com.eighthours.tickgo.ticket.dto.TicketQueryRespDTO;
 import com.eighthours.tickgo.ticket.common.Result;
+import com.eighthours.tickgo.ticket.dto.purchaseDTO;
+import com.eighthours.tickgo.ticket.entity.SeatDO;
 import com.eighthours.tickgo.ticket.exception.BizException;
 import com.eighthours.tickgo.ticket.service.TicketService;
 import lombok.RequiredArgsConstructor;
@@ -26,6 +28,12 @@ public class TicketController {
         TicketQueryRespDTO data = ticketService.queryRemainTicket(trainId, departure, arrival);
         return Result.success(data);
     }
+
+    @PostMapping("/purchaseV1")
+    public SeatDO purchaseV1(@RequestBody purchaseDTO request) {
+        return ticketService.purchaseV1(request);
+    }
+
 
     @PostMapping("/preOccupy")
     public Result<SeatPreOccupyRespDTO> preOccupySeats(@RequestBody PreOccupyRequestDTO request) {

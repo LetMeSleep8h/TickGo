@@ -1,11 +1,17 @@
 package com.eighthours.tickgo.ticket.service;
 
+import com.eighthours.tickgo.ticket.common.Result;
 import com.eighthours.tickgo.ticket.dto.SeatPreOccupyRespDTO;
 import com.eighthours.tickgo.ticket.dto.TicketQueryRespDTO;
+import com.eighthours.tickgo.ticket.dto.purchaseDTO;
+import com.eighthours.tickgo.ticket.entity.SeatDO;
 
 import java.util.List;
 
 public interface TicketService {
+
+    SeatDO purchaseV1(purchaseDTO request);
+
 
     TicketQueryRespDTO queryRemainTicket(Long trainId, String departure, String arrival);
 

@@ -2,10 +2,8 @@ package com.eighthours.tickgo.ticket.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
-import com.eighthours.tickgo.ticket.dto.SeatItemDTO;
-import com.eighthours.tickgo.ticket.dto.SeatPreOccupyRespDTO;
-import com.eighthours.tickgo.ticket.dto.SeatTypeRemainDTO;
-import com.eighthours.tickgo.ticket.dto.TicketQueryRespDTO;
+import com.eighthours.tickgo.ticket.common.Result;
+import com.eighthours.tickgo.ticket.dto.*;
 import com.eighthours.tickgo.ticket.enums.TicketStatusEnum;
 import com.eighthours.tickgo.ticket.exception.BizException;
 import com.eighthours.tickgo.ticket.entity.SeatDO;
@@ -64,6 +62,27 @@ public class TicketServiceImpl implements TicketService {
                 refreshIntervalToken(trainId, stations.get(i).getStationName(), stations.get(j).getStationName(), allSeatTypes);
             }
         }
+    }
+
+
+    @Override
+    public SeatDO purchaseV1(purchaseDTO request) {
+        List<SeatDO> seatDOList = seatMapper.selectList(
+                new LambdaQueryWrapper<SeatDO>()
+                        .eq(SeatDO::getTrainId, request.getTrainId())
+                        .eq(SeatDO::getSeatType, request.getSeatType())
+                        .eq(SeatDO::getStartStation, request.getDeparture())
+                        .eq(SeatDO::getEndStation, request.getArrival())
+        );
+        SeatDO seat = seatDOList.get(0);
+        seatMapper.update(
+                new LambdaUpdateWrapper<SeatDO>()
+                        .set(SeatDO::getSeatStatus, 1)
+                        .eq(SeatDO::getId, seat.getId())
+        );
+
+
+        return seat;
     }
 
     @Override
