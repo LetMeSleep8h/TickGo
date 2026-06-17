@@ -167,6 +167,17 @@ public class OrderServiceImpl implements OrderService {
                         .eq(OrderDO::getStatus, OrderStatusEnum.WAIT_PAY.getCode()));
 
         if (orderUpdated != 1) {
+            OrderDO latestOrder = orderMapper.selectOne(
+                    new LambdaQueryWrapper<OrderDO>()
+                            .eq(OrderDO::getOrderSn, orderSn));
+            if (latestOrder == null) {
+                throw new BizException("订单不存在");
+            }
+            if (OrderStatusEnum.PAID.getCode().equals(latestOrder.getStatus())
+                    || OrderStatusEnum.CANCELED.getCode().equals(latestOrder.getStatus())) {
+                log.info("订单已被其他请求处理，直接返回，orderSn={}, status={}", orderSn, latestOrder.getStatus());
+                return;
+            }
             throw new BizException("订单状态更新失败");
         }
 
