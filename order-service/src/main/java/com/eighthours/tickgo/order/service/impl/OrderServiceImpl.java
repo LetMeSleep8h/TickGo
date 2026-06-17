@@ -75,7 +75,13 @@ public class OrderServiceImpl implements OrderService {
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                orderCancelProducer.sendCancelDelayMessage(request.getOrderSn(), 4);
+                try {
+                    orderCancelProducer.sendDefaultCancelDelayMessage(request.getOrderSn());
+                } catch (Exception e) {
+                    log.error("发送延迟取消消息失败，创建补偿任务，orderSn={}", request.getOrderSn(), e);
+                    compensationService.createCompensationTask(
+                            CompensationServiceImpl.TASK_TYPE_SEND_CANCEL_DELAY_MESSAGE, request.getOrderSn());
+                }
             }
         });
     }

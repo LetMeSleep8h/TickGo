@@ -13,9 +13,19 @@ import org.springframework.stereotype.Component;
 public class OrderCancelProducer {
 
     private static final String ORDER_CANCEL_TOPIC = "tickgo-order-cancel";
+    public static final int DEFAULT_CANCEL_DELAY_LEVEL = 4;
+    public static final long DEFAULT_CANCEL_DELAY_SECONDS = 30L;
+    private static final long[] DELAY_LEVEL_SECONDS = {
+            1, 5, 10, 30, 60, 120, 180, 240, 300,
+            360, 420, 480, 540, 600, 1200, 1800, 3600, 7200
+    };
 
     @Autowired
     private RocketMQTemplate rocketMQTemplate;
+
+    public void sendDefaultCancelDelayMessage(String orderSn) {
+        sendCancelDelayMessage(orderSn, DEFAULT_CANCEL_DELAY_LEVEL);
+    }
 
     public void sendCancelDelayMessage(String orderSn, int delayLevel) {
         OrderCancelDelayMessage message = new OrderCancelDelayMessage();
@@ -30,5 +40,37 @@ public class OrderCancelProducer {
             log.error("发送延迟取消订单消息失败, orderSn: {}", orderSn, e);
             throw new RuntimeException("发送延迟取消订单消息失败", e);
         }
+    }
+
+    public void sendCancelDelayMessageByRemainingSeconds(String orderSn, long remainingSeconds) {
+        if (remainingSeconds <= 0) {
+            sendCancelMessage(orderSn);
+            return;
+        }
+        sendCancelDelayMessage(orderSn, resolveDelayLevel(remainingSeconds));
+    }
+
+    public void sendCancelMessage(String orderSn) {
+        OrderCancelDelayMessage message = new OrderCancelDelayMessage();
+        message.setOrderSn(orderSn);
+
+        Message<OrderCancelDelayMessage> mqMessage = MessageBuilder.withPayload(message).build();
+
+        try {
+            rocketMQTemplate.syncSend(ORDER_CANCEL_TOPIC, mqMessage);
+            log.info("发送立即取消订单消息成功, orderSn: {}", orderSn);
+        } catch (Exception e) {
+            log.error("发送立即取消订单消息失败, orderSn: {}", orderSn, e);
+            throw new RuntimeException("发送立即取消订单消息失败", e);
+        }
+    }
+
+    private int resolveDelayLevel(long remainingSeconds) {
+        for (int i = 0; i < DELAY_LEVEL_SECONDS.length; i++) {
+            if (remainingSeconds <= DELAY_LEVEL_SECONDS[i]) {
+                return i + 1;
+            }
+        }
+        return DELAY_LEVEL_SECONDS.length;
     }
 }

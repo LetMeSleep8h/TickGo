@@ -4,15 +4,21 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.eighthours.tickgo.order.dto.TicketOrderRequestDTO;
 import com.eighthours.tickgo.order.entity.CompensationTask;
+import com.eighthours.tickgo.order.entity.OrderDO;
+import com.eighthours.tickgo.order.enums.OrderStatusEnum;
 import com.eighthours.tickgo.order.feign.TicketServiceClient;
+import com.eighthours.tickgo.order.mapper.OrderMapper;
 import com.eighthours.tickgo.order.mapper.CompensationTaskMapper;
+import com.eighthours.tickgo.order.mq.OrderCancelProducer;
 import com.eighthours.tickgo.order.service.CompensationService;
 import com.eighthours.tickgo.order.ticket.Result;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.dao.DuplicateKeyException;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -22,10 +28,13 @@ import java.util.List;
 public class CompensationServiceImpl implements CompensationService {
 
     private final CompensationTaskMapper compensationTaskMapper;
+    private final OrderMapper orderMapper;
     private final TicketServiceClient ticketServiceClient;
+    private final OrderCancelProducer orderCancelProducer;
 
     public static final String TASK_TYPE_CANCEL_TICKET = "CANCEL_TICKET";
     public static final String TASK_TYPE_CONFIRM_TICKET = "CONFIRM_TICKET";
+    public static final String TASK_TYPE_SEND_CANCEL_DELAY_MESSAGE = "SEND_CANCEL_DELAY_MESSAGE";
 
     public static final int STATUS_PENDING = 0;
     public static final int STATUS_PROCESSING = 1;
@@ -45,6 +54,8 @@ public class CompensationServiceImpl implements CompensationService {
             task.setNextRetryTime(LocalDateTime.now());
             compensationTaskMapper.insert(task);
             log.info("创建补偿任务成功，taskType={}, bizId={}", taskType, bizId);
+        } catch (DuplicateKeyException e) {
+            log.info("补偿任务已存在，忽略重复创建，taskType={}, bizId={}", taskType, bizId);
         } catch (Exception e) {
             log.error("创建补偿任务失败，taskType={}, bizId={}", taskType, bizId, e);
         }
@@ -104,6 +115,8 @@ public class CompensationServiceImpl implements CompensationService {
                 case TASK_TYPE_CONFIRM_TICKET:
                     Result<Void> confirmResult = ticketServiceClient.confirmTickets(new TicketOrderRequestDTO(task.getBizId()));
                     return confirmResult.getCode() == 200;
+                case TASK_TYPE_SEND_CANCEL_DELAY_MESSAGE:
+                    return resendCancelDelayMessage(task.getBizId());
                 default:
                     log.warn("未知任务类型，taskType={}", task.getTaskType());
                     return true;
@@ -112,6 +125,35 @@ public class CompensationServiceImpl implements CompensationService {
             log.error("执行补偿失败，id={}, taskType={}, bizId={}", task.getId(), task.getTaskType(), task.getBizId(), e);
             return false;
         }
+    }
+
+    private boolean resendCancelDelayMessage(String orderSn) {
+        OrderDO order = orderMapper.selectOne(
+                new LambdaQueryWrapper<OrderDO>()
+                        .eq(OrderDO::getOrderSn, orderSn));
+        if (order == null) {
+            log.info("订单不存在，忽略延迟消息补偿，orderSn={}", orderSn);
+            return true;
+        }
+        if (!OrderStatusEnum.WAIT_PAY.getCode().equals(order.getStatus())) {
+            log.info("订单已非待支付状态，忽略延迟消息补偿，orderSn={}, status={}", orderSn, order.getStatus());
+            return true;
+        }
+
+        LocalDateTime orderTime = order.getOrderTime() != null ? order.getOrderTime() : order.getCreateTime();
+        if (orderTime == null) {
+            orderCancelProducer.sendCancelMessage(orderSn);
+            return true;
+        }
+
+        LocalDateTime expireTime = orderTime.plusSeconds(OrderCancelProducer.DEFAULT_CANCEL_DELAY_SECONDS);
+        long remainingSeconds = Duration.between(LocalDateTime.now(), expireTime).getSeconds();
+        if (remainingSeconds > 0) {
+            orderCancelProducer.sendCancelDelayMessageByRemainingSeconds(orderSn, remainingSeconds);
+        } else {
+            orderCancelProducer.sendCancelMessage(orderSn);
+        }
+        return true;
     }
 
     private void handleRetry(CompensationTask task) {
