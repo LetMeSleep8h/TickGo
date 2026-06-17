@@ -1,776 +1,225 @@
-# TickGo
+TickGo
+参考 12306 场景实现的区间购票与订单补偿系统，聚焦区间库存建模、并发锁座、防超卖、延迟取消、重复消费幂等与补偿重试。
 
-> 简化版 12306 区间购票系统，聚焦“查票、预占、下单、支付确认、超时取消释放”主链路，重点演示区间库存建模、Redis token 前置拦截、分布式锁、MySQL 最终锁座、延迟消息和补偿任务等典型工程问题。
+项目亮点 · 系统架构 · 核心链路 · 关键设计 · 快速启动 · 后续优化
 
-## 1. 项目简介
+项目亮点
+区间库存模型：不是简单按整趟车卖票，而是把物理座位拆成多个区间段 segment，支持按 出发站 -> 到达站 锁座和统计余票。
+防超卖链路：通过 Redis token 前置拦截 + 购票入口幂等 + Redisson 分布式锁 + MySQL 条件更新 控制高并发下的重复提交与并发锁座。
+MySQL 最终兜底：Redis 负责前置削峰和控制，真正决定是否成功锁座的是 MySQL 中的区间座位状态，保证最终库存一致性。
+延迟取消与补偿：使用 RocketMQ 延迟消息处理超时未支付订单；通过订单状态幂等判断处理重复消费；消息发送或资源释放失败时落补偿任务异步重试。
+项目定位
+TickGo 不是普通 CRUD 项目，而是围绕火车票区间售卖场景做的一个最小可运行系统。
+当前版本重点不在“功能多”，而在把后端常见的几个工程问题串到一条主链路里：
 
-TickGo 不是普通 CRUD 项目，而是围绕火车票区间售卖场景做的最小可运行系统。
-
-项目目标：
-
-- 支持按 `出发站 -> 到达站` 查询余票
-- 支持多乘车人下单与座位预占
-- 支持支付确认与超时取消
-- 支持取消后释放座位、回补 token
-- 支持通过网关统一转发请求
-
-当前版本采用“前端编排 + 多服务协作”的方式串起完整业务链路，优先跑通最小 MVP，并把核心一致性问题暴露出来、解释清楚。
-
-## 2. 技术栈
-
-- 后端：Java 17、Spring Boot、Spring Cloud Gateway、OpenFeign、MyBatis-Plus
-- 存储：MySQL、Redis
-- 并发控制：Redisson 分布式锁
-- 消息队列：RocketMQ（延迟关闭订单）
-- 前端：Vue3、TypeScript、Ant Design Vue
-
-## 3. 系统架构图
-
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#ffffff',
-  'primaryColor': '#ffffff',
-  'primaryTextColor': '#000000',
-  'primaryBorderColor': '#000000',
-  'secondaryColor': '#ffffff',
-  'secondaryTextColor': '#000000',
-  'secondaryBorderColor': '#000000',
-  'tertiaryColor': '#ffffff',
-  'tertiaryTextColor': '#000000',
-  'tertiaryBorderColor': '#000000',
-  'lineColor': '#000000',
-  'textColor': '#000000',
-  'mainBkg': '#ffffff',
-  'nodeBorder': '#000000',
-  'clusterBkg': '#ffffff',
-  'clusterBorder': '#000000'
-}}}%%
+区间库存怎么建模
+高并发下怎么尽量避免超卖
+重复提交怎么拦
+超时未支付怎么自动取消
+MQ 重复消费和发送失败怎么处理
+事务外失败为什么要走补偿而不是回滚
+技术栈
+后端
+Java 17
+Spring Boot
+Spring Cloud Gateway
+OpenFeign
+MyBatis-Plus
+数据与中间件
+MySQL
+Redis
+Redisson
+RocketMQ
+前端
+Vue3
+TypeScript
+系统架构
 flowchart LR
-    A["Browser / Vue3 Frontend"] --> B["gateway-service :8080"]
-
-    B --> C["user-service :8084"]
-    B --> D["ticket-service :8082"]
-    B --> E["order-service :8083"]
-
-    C --> F["MySQL<br/>user / passenger"]
-    D --> G["MySQL<br/>train / station / seat / ticket"]
-    D --> H["Redis<br/>ticket token"]
-    D --> I["Redisson Lock"]
-    E --> J["MySQL<br/>order / order_item / compensation_task"]
-    E --> K["RocketMQ<br/>delay cancel"]
-
-    A -. "1. validate passengers" .-> C
-    A -. "2. preOccupy seats" .-> D
-    A -. "3. create order" .-> E
-
-    E -. "pay after commit -> confirm" .-> D
-    E -. "cancel/timeout after commit -> release" .-> D
-```
-
-## 4. 服务职责
-
-### `gateway-service`
-
-- 对外统一入口
-- 按路径转发到不同服务
-- 当前路由：
-  - `/api/user/** -> user-service`
-  - `/api/ticket/** -> ticket-service`
-  - `/api/order/** -> order-service`
-
-### `user-service`
-
-- 用户信息查询
-- 乘车人管理
-- 校验乘车人是否属于当前用户
-
-### `ticket-service`
-
-- 查票
-- 初始化 / 刷新 Redis token
-- 预占座位 `preOccupy`
-- 支付成功后确认车票 `confirm`
-- 取消或超时后释放座位 `release`
-
-### `order-service`
-
-- 创建订单与订单明细
-- 支付订单
-- 取消订单
-- 发送延迟关闭消息
-- 失败后记录补偿任务并定时重试
-
-## 5. 核心数据模型
-
-### `t_seat` 区间段模型
-
-核心思路不是给每个座位只存一行，而是把一个物理座位拆成多个相邻站点 segment，例如：
-
-```text
-北京南 -> 济南西
-济南西 -> 南京南
-南京南 -> 杭州东
-杭州东 -> 宁波
-```
-
-例如座位 `01A` 会拆成多行：
-
-```text
-01A 北京南->济南西
-01A 济南西->南京南
-01A 南京南->杭州东
-01A 杭州东->宁波
-```
-
-这样做的好处：
-
-- 能表达“区间售票”
-- 能复用不重叠区间的同一物理座位
-- 锁座时可以只锁目标区间覆盖到的 segment
-
-### 其他核心表
-
-- `t_train`：车次
-- `t_train_station`：车次站点与序号
-- `t_ticket`：预占 / 已支付 / 已取消的车票记录
-- `t_order`：订单主表
-- `t_order_item`：订单明细
-- `compensation_task`：补偿任务表
-
-## 6. 核心业务链路
-
-### 6.1 查票链路
-
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#ffffff',
-  'primaryColor': '#ffffff',
-  'primaryTextColor': '#000000',
-  'primaryBorderColor': '#000000',
-  'secondaryColor': '#ffffff',
-  'secondaryTextColor': '#000000',
-  'secondaryBorderColor': '#000000',
-  'tertiaryColor': '#ffffff',
-  'tertiaryTextColor': '#000000',
-  'tertiaryBorderColor': '#000000',
-  'lineColor': '#000000',
-  'textColor': '#000000',
-  'actorBkg': '#ffffff',
-  'actorBorder': '#000000',
-  'actorTextColor': '#000000',
-  'signalColor': '#000000',
-  'signalTextColor': '#000000',
-  'labelBoxBkgColor': '#ffffff',
-  'labelBoxBorderColor': '#000000',
-  'labelTextColor': '#000000',
-  'activationBorderColor': '#000000',
-  'activationBkgColor': '#ffffff',
-  'sequenceNumberColor': '#000000'
-}}}%%
-sequenceDiagram
-    participant FE as Frontend
-    participant GW as Gateway
-    participant TS as ticket-service
-    participant DB as MySQL
-
-    FE->>GW: GET /api/ticket/query
-    GW->>TS: /ticket/query
-    TS->>DB: 按 trainId + station sequence 查询 segment
-    TS->>DB: 按物理座位聚合可售区间
-    TS-->>FE: 返回各 seatType 剩余数量
-```
-
-说明：
-
-1. 先通过 `t_train_station` 拿到出发站和到达站的站点序号
-2. 找出目标区间覆盖的所有 segment
-3. 只有一个座位在目标区间内所有 segment 都可用，才算该座位可售
-4. 最终按 `seatType` 聚合剩余数量
-
-### 6.2 下单链路
-
-当前实现不是聚合服务编排，而是**前端顺序调用多个服务接口**：
-
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#ffffff',
-  'primaryColor': '#ffffff',
-  'primaryTextColor': '#000000',
-  'primaryBorderColor': '#000000',
-  'secondaryColor': '#ffffff',
-  'secondaryTextColor': '#000000',
-  'secondaryBorderColor': '#000000',
-  'tertiaryColor': '#ffffff',
-  'tertiaryTextColor': '#000000',
-  'tertiaryBorderColor': '#000000',
-  'lineColor': '#000000',
-  'textColor': '#000000',
-  'actorBkg': '#ffffff',
-  'actorBorder': '#000000',
-  'actorTextColor': '#000000',
-  'signalColor': '#000000',
-  'signalTextColor': '#000000',
-  'labelBoxBkgColor': '#ffffff',
-  'labelBoxBorderColor': '#000000',
-  'labelTextColor': '#000000',
-  'activationBorderColor': '#000000',
-  'activationBkgColor': '#ffffff',
-  'sequenceNumberColor': '#000000'
-}}}%%
-sequenceDiagram
-    participant FE as Frontend
-    participant US as user-service
-    participant TS as ticket-service
-    participant OS as order-service
-    participant R as Redis
-    participant L as Redisson
-    participant DB as MySQL
-
-    FE->>US: validate-passengers
-    US-->>FE: 校验通过
-
-    FE->>TS: preOccupy(trainId, departure, arrival, orderSn, passengers)
-    TS->>R: 扣减对应区间 token
-    TS->>L: 获取分布式锁
-    TS->>DB: 锁定目标区间 seat segment
-    TS->>DB: 写入 t_ticket(WAIT_PAY)
-    TS-->>FE: 返回座位结果
-
-    FE->>OS: createOrder(orderSn, items)
-    OS->>DB: 写入 t_order / t_order_item
-    OS->>OS: 提交后发送延迟取消消息
-    OS-->>FE: 创建成功
-```
-
-### 6.3 支付确认链路
-
-```text
-前端调用 /api/order/pay
--> order-service 更新 t_order / t_order_item 为已支付
--> 事务提交后远程调用 ticket-service /ticket/confirm
--> ticket-service 将 t_ticket 状态改为已支付
--> 如果远程确认失败，则写 compensation_task 交给定时任务补偿
-```
-
-### 6.4 超时取消 / 主动取消链路
-
-```text
-RocketMQ 延迟消息触发 或 前端主动调用 /api/order/cancel
--> order-service 更新订单状态为已取消
--> 事务提交后远程调用 ticket-service /ticket/release
--> ticket-service 释放 MySQL 区间座位
--> ticket-service 回收 / 重刷 Redis token
--> 如果释放失败，则写 compensation_task 继续补偿
-```
-
-## 7. 关键技术点
-
-### 7.1 Redis token 前置拦截
-
-- Redis 中按 `(trainId, departure, arrival, seatType)` 维护 token
-- 下单前先扣 token，优先挡掉无效请求
-- 目的不是代替数据库，而是减少大量请求直接打到 MySQL
-
-### 7.2 Redisson 分布式锁
-
-- 在相同区间、相同座席类型维度加锁
-- 防止并发下多个请求同时挑中同一批候选座位
-
-### 7.3 MySQL 最终锁座
-
-- 真正决定“是否超卖”的最终依据仍然是 MySQL 中的区间座位状态
-- Redis 负责前置拦截，MySQL 负责最终真实库存
-
-### 7.4 延迟消息关闭订单
-
-- 订单创建后发送 RocketMQ 延迟消息
-- 到期仍未支付则自动取消订单并释放资源
-
-### 7.5 补偿任务
-
-- `order-service` 在调用 `ticket-service.confirm/release` 失败时写入补偿任务
-- 通过定时任务兜底重试，避免订单状态与车票状态长期不一致
-
-## 8. 当前问题与优化方向
-
-### 当前已知边界
-
-1. 当前下单编排在前端，不是标准聚合层 / 订单编排服务
-2. Redis token 与 MySQL 区间库存的一致性，目前采用“按车次全量重刷 token”的简单方案
-3. 这个方案优先保证正确性，但刷新粒度较粗，性能还有优化空间
-
-### 后续优化方向
-
-1. 把下单入口收口到单一编排服务，由服务端统一完成 `validate -> preOccupy -> createOrder`
-2. 用 `Redis Hash + Lua` 精细化扣减父区间 / 子区间 token，而不是每次全量刷新
-3. 优化选座算法，支持更合理的多乘客邻座分配
-4. 补充更完整的监控、日志链路和压测数据
-
-## 9. 快速启动
-
-面试展示场景下不要求完整部署，下面只保留最小启动信息。
-
-### 环境依赖
-
-- JDK 17
-- MySQL 8.x
-- Redis
-- RocketMQ
-- Node.js 18+
-
-### 启动顺序
-
-1. 执行 `resources/db` 下的建表与初始化 SQL
-2. 启动 `user-service`
-3. 启动 `ticket-service`
-4. 启动 `order-service`
-5. 启动 `gateway-service`
-6. 启动 `frontend`
-
-### 默认入口
-
-- 网关：`http://localhost:8080`
-- 前端：`http://localhost:5173`
-
-## 10. 典型接口
-
-### 查票
-
-```http
-GET /api/ticket/query?trainId=1&departure=北京南&arrival=杭州东
-```
-
-### 预占座位
-
-```http
-POST /api/ticket/preOccupy
-Content-Type: application/json
-
-{
-  "trainId": 1,
-  "departure": "北京南",
-  "arrival": "杭州东",
-  "orderSn": "ORDER_001",
-  "passengers": [
-    {
-      "passengerId": 1001,
-      "seatType": 1
-    }
-  ]
-}
-```
-
-### 创建订单
-
-```http
-POST /api/order/create
-Content-Type: application/json
-```
-
-### 支付订单
-
-```http
-POST /api/order/pay?orderSn=ORDER_001
-```
-
-### 取消订单
-
-```http
-POST /api/order/cancel?orderSn=ORDER_001
-```
-
-## 11. 面试可重点展开的话题
-
-- 为什么区间购票不能只用一张简单座位表
-- Redis token、分布式锁、MySQL 锁座三者分别解决什么问题
-- 为什么当前版本不会超卖，但仍然可能出现“显示有票但买不到”
-- 为什么要做延迟取消和补偿任务
-- 如果继续优化，会怎么把前端编排收口到服务端
-# TickGo
-
-> 简化版 12306 区间购票系统，聚焦“查票、预占、下单、支付确认、超时取消释放”主链路，重点演示区间库存建模、Redis token 前置拦截、分布式锁、MySQL 最终锁座、延迟消息和补偿任务等典型工程问题。
-
-## 1. 项目简介
-
-TickGo 不是普通 CRUD 项目，而是围绕火车票区间售卖场景做的最小可运行系统。
-
-项目目标：
-
-- 支持按 `出发站 -> 到达站` 查询余票
-- 支持多乘车人下单与座位预占
-- 支持支付确认与超时取消
-- 支持取消后释放座位、回补 token
-- 支持通过网关统一转发请求
-
-当前版本采用“前端编排 + 多服务协作”的方式串起完整业务链路，优先跑通最小 MVP，并把核心一致性问题暴露出来、解释清楚。
-
-## 2. 技术栈
-
-- 后端：Java 17、Spring Boot、Spring Cloud Gateway、OpenFeign、MyBatis-Plus
-- 存储：MySQL、Redis
-- 并发控制：Redisson 分布式锁
-- 消息队列：RocketMQ（延迟关闭订单）
-- 前端：Vue3、TypeScript、Ant Design Vue
-
-## 3. 系统架构图
-
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#ffffff',
-  'primaryColor': '#ffffff',
-  'primaryTextColor': '#000000',
-  'primaryBorderColor': '#000000',
-  'secondaryColor': '#ffffff',
-  'secondaryTextColor': '#000000',
-  'secondaryBorderColor': '#000000',
-  'tertiaryColor': '#ffffff',
-  'tertiaryTextColor': '#000000',
-  'tertiaryBorderColor': '#000000',
-  'lineColor': '#000000',
-  'textColor': '#000000',
-  'mainBkg': '#ffffff',
-  'nodeBorder': '#000000',
-  'clusterBkg': '#ffffff',
-  'clusterBorder': '#000000'
-}}}%%
-flowchart LR
-    A["Browser / Vue3 Frontend"] --> B["gateway-service :8080"]
-
-    B --> C["user-service :8084"]
-    B --> D["ticket-service :8082"]
-    B --> E["order-service :8083"]
-
-    C --> F["MySQLuser / passenger"]
-    D --> G["MySQLtrain / station / seat / ticket"]
-    D --> H["Redisticket token"]
-    D --> I["Redisson Lock"]
-    E --> J["MySQLorder / order_item / compensation_task"]
-    E --> K["RocketMQdelay cancel"]
-
-    A -. "1. validate passengers" .-> C
-    A -. "2. preOccupy seats" .-> D
-    A -. "3. create order" .-> E
-
-    E -. "pay after commit -> confirm" .-> D
-    E -. "cancel/timeout after commit -> release" .-> D
-```
-
-## 4. 服务职责
-
-### `gateway-service`
-
-- 对外统一入口
-- 按路径转发到不同服务
-- 当前路由：
-  - `/api/user/** -> user-service`
-  - `/api/ticket/** -> ticket-service`
-  - `/api/order/** -> order-service`
-
-### `user-service`
-
-- 用户信息查询
-- 乘车人管理
-- 校验乘车人是否属于当前用户
-
-### `ticket-service`
-
-- 查票
-- 初始化 / 刷新 Redis token
-- 预占座位 `preOccupy`
-- 支付成功后确认车票 `confirm`
-- 取消或超时后释放座位 `release`
-
-### `order-service`
-
-- 创建订单与订单明细
-- 支付订单
-- 取消订单
-- 发送延迟关闭消息
-- 失败后记录补偿任务并定时重试
-
-## 5. 核心数据模型
-
-### `t_seat` 区间段模型
-
-核心思路不是给每个座位只存一行，而是把一个物理座位拆成多个相邻站点 segment，例如：
-
-```text
-北京南 -> 济南西
-济南西 -> 南京南
-南京南 -> 杭州东
-杭州东 -> 宁波
-```
-
-例如座位 `01A` 会拆成多行：
-
-```text
-01A 北京南->济南西
-01A 济南西->南京南
-01A 南京南->杭州东
-01A 杭州东->宁波
-```
-
-这样做的好处：
-
-- 能表达“区间售票”
-- 能复用不重叠区间的同一物理座位
-- 锁座时可以只锁目标区间覆盖到的 segment
-
-### 其他核心表
-
-- `t_train`：车次
-- `t_train_station`：车次站点与序号
-- `t_ticket`：预占 / 已支付 / 已取消的车票记录
-- `t_order`：订单主表
-- `t_order_item`：订单明细
-- `compensation_task`：补偿任务表
-
-## 6. 核心业务链路
-
-### 6.1 查票链路
-
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#ffffff',
-  'primaryColor': '#ffffff',
-  'primaryTextColor': '#000000',
-  'primaryBorderColor': '#000000',
-  'secondaryColor': '#ffffff',
-  'secondaryTextColor': '#000000',
-  'secondaryBorderColor': '#000000',
-  'tertiaryColor': '#ffffff',
-  'tertiaryTextColor': '#000000',
-  'tertiaryBorderColor': '#000000',
-  'lineColor': '#000000',
-  'textColor': '#000000',
-  'actorBkg': '#ffffff',
-  'actorBorder': '#000000',
-  'actorTextColor': '#000000',
-  'signalColor': '#000000',
-  'signalTextColor': '#000000',
-  'labelBoxBkgColor': '#ffffff',
-  'labelBoxBorderColor': '#000000',
-  'labelTextColor': '#000000',
-  'activationBorderColor': '#000000',
-  'activationBkgColor': '#ffffff',
-  'sequenceNumberColor': '#000000'
-}}}%%
-sequenceDiagram
-    participant FE as Frontend
-    participant GW as Gateway
-    participant TS as ticket-service
-    participant DB as MySQL
-
-    FE->>GW: GET /api/ticket/query
-    GW->>TS: /ticket/query
-    TS->>DB: 按 trainId + station sequence 查询 segment
-    TS->>DB: 按物理座位聚合可售区间
-    TS-->>FE: 返回各 seatType 剩余数量
-```
-
-说明：
-
-1. 先通过 `t_train_station` 拿到出发站和到达站的站点序号
-2. 找出目标区间覆盖的所有 segment
-3. 只有一个座位在目标区间内所有 segment 都可用，才算该座位可售
-4. 最终按 `seatType` 聚合剩余数量
-
-### 6.2 下单链路
-
-当前实现不是聚合服务编排，而是**前端顺序调用多个服务接口**：
-
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#ffffff',
-  'primaryColor': '#ffffff',
-  'primaryTextColor': '#000000',
-  'primaryBorderColor': '#000000',
-  'secondaryColor': '#ffffff',
-  'secondaryTextColor': '#000000',
-  'secondaryBorderColor': '#000000',
-  'tertiaryColor': '#ffffff',
-  'tertiaryTextColor': '#000000',
-  'tertiaryBorderColor': '#000000',
-  'lineColor': '#000000',
-  'textColor': '#000000',
-  'actorBkg': '#ffffff',
-  'actorBorder': '#000000',
-  'actorTextColor': '#000000',
-  'signalColor': '#000000',
-  'signalTextColor': '#000000',
-  'labelBoxBkgColor': '#ffffff',
-  'labelBoxBorderColor': '#000000',
-  'labelTextColor': '#000000',
-  'activationBorderColor': '#000000',
-  'activationBkgColor': '#ffffff',
-  'sequenceNumberColor': '#000000'
-}}}%%
-sequenceDiagram
-    participant FE as Frontend
-    participant US as user-service
-    participant TS as ticket-service
-    participant OS as order-service
-    participant R as Redis
-    participant L as Redisson
-    participant DB as MySQL
-
-    FE->>US: validate-passengers
-    US-->>FE: 校验通过
-
-    FE->>TS: preOccupy(trainId, departure, arrival, orderSn, passengers)
-    TS->>R: 扣减对应区间 token
-    TS->>L: 获取分布式锁
-    TS->>DB: 锁定目标区间 seat segment
-    TS->>DB: 写入 t_ticket(WAIT_PAY)
-    TS-->>FE: 返回座位结果
-
-    FE->>OS: createOrder(orderSn, items)
-    OS->>DB: 写入 t_order / t_order_item
-    OS->>OS: 提交后发送延迟取消消息
-    OS-->>FE: 创建成功
-```
-
-### 6.3 支付确认链路
-
-```text
-前端调用 /api/order/pay
--> order-service 更新 t_order / t_order_item 为已支付
--> 事务提交后远程调用 ticket-service /ticket/confirm
--> ticket-service 将 t_ticket 状态改为已支付
--> 如果远程确认失败，则写 compensation_task 交给定时任务补偿
-```
-
-### 6.4 超时取消 / 主动取消链路
-
-```text
-RocketMQ 延迟消息触发 或 前端主动调用 /api/order/cancel
--> order-service 更新订单状态为已取消
--> 事务提交后远程调用 ticket-service /ticket/release
--> ticket-service 释放 MySQL 区间座位
--> ticket-service 回收 / 重刷 Redis token
--> 如果释放失败，则写 compensation_task 继续补偿
-```
-
-## 7. 关键技术点
-
-### 7.1 Redis token 前置拦截
-
-- Redis 中按 `(trainId, departure, arrival, seatType)` 维护 token
-- 下单前先扣 token，优先挡掉无效请求
-- 目的不是代替数据库，而是减少大量请求直接打到 MySQL
-
-### 7.2 Redisson 分布式锁
-
-- 在相同区间、相同座席类型维度加锁
-- 防止并发下多个请求同时挑中同一批候选座位
-
-### 7.3 MySQL 最终锁座
-
-- 真正决定“是否超卖”的最终依据仍然是 MySQL 中的区间座位状态
-- Redis 负责前置拦截，MySQL 负责最终真实库存
-
-### 7.4 延迟消息关闭订单
-
-- 订单创建后发送 RocketMQ 延迟消息
-- 到期仍未支付则自动取消订单并释放资源
-
-### 7.5 补偿任务
-
-- `order-service` 在调用 `ticket-service.confirm/release` 失败时写入补偿任务
-- 通过定时任务兜底重试，避免订单状态与车票状态长期不一致
-
-## 8. 当前问题与优化方向
-
-### 当前已知边界
-
-1. 当前下单编排在前端，不是标准聚合层 / 订单编排服务
-2. Redis token 与 MySQL 区间库存的一致性，目前采用“按车次全量重刷 token”的简单方案
-3. 这个方案优先保证正确性，但刷新粒度较粗，性能还有优化空间
-
-### 后续优化方向
-
-1. 把下单入口收口到单一编排服务，由服务端统一完成 `validate -> preOccupy -> createOrder`
-2. 用 `Redis Hash + Lua` 精细化扣减父区间 / 子区间 token，而不是每次全量刷新
-3. 优化选座算法，支持更合理的多乘客邻座分配
-4. 补充更完整的监控、日志链路和压测数据
-
-## 9. 快速启动
-
-面试展示场景下不要求完整部署，下面只保留最小启动信息。
-
-### 环境依赖
-
-- JDK 17
-- MySQL 8.x
-- Redis
-- RocketMQ
-- Node.js 18+
-
-### 启动顺序
-
-1. 执行 `resources/db` 下的建表与初始化 SQL
-2. 启动 `user-service`
-3. 启动 `ticket-service`
-4. 启动 `order-service`
-5. 启动 `gateway-service`
-6. 启动 `frontend`
-
-### 默认入口
-
-- 网关：`http://localhost:8080`
-- 前端：`http://localhost:5173`
-
-## 10. 典型接口
-
-### 查票
-
-```http
-GET /api/ticket/query?trainId=1&departure=北京南&arrival=杭州东
-```
-
-### 预占座位
-
-```http
-POST /api/ticket/preOccupy
-Content-Type: application/json
-
-{
-  "trainId": 1,
-  "departure": "北京南",
-  "arrival": "杭州东",
-  "orderSn": "ORDER_001",
-  "passengers": [
-    {
-      "passengerId": 1001,
-      "seatType": 1
-    }
-  ]
-}
-```
-
-### 创建订单
-
-```http
-POST /api/order/create
-Content-Type: application/json
-```
-
-### 支付订单
-
-```http
-POST /api/order/pay?orderSn=ORDER_001
-```
-
-### 取消订单
-
-```http
-POST /api/order/cancel?orderSn=ORDER_001
-```
-
-## 11. 面试可重点展开的话题
-
-- 为什么区间购票不能只用一张简单座位表
-- Redis token、分布式锁、MySQL 锁座三者分别解决什么问题
-- 为什么当前版本不会超卖，但仍然可能出现“显示有票但买不到”
-- 为什么要做延迟取消和补偿任务
-- 如果继续优化，会怎么把前端编排收口到服务端
+    FE["Frontend / Vue3"] --> GW["gateway-service"]
+    GW --> US["user-service"]
+    GW --> TS["ticket-service"]
+    GW --> OS["order-service"]
+
+    US --> UDB["MySQL<br/>user / passenger"]
+    TS --> TDB["MySQL<br/>train / station / seat / ticket"]
+    TS --> R["Redis<br/>token / idempotent"]
+    TS --> RL["Redisson Lock"]
+    OS --> ODB["MySQL<br/>order / order_item / compensation_task"]
+    OS --> MQ["RocketMQ<br/>delay cancel"]
+
+    FE -. validate passengers .-> US
+    FE -. preOccupy / purchase .-> TS
+    FE -. create / pay / cancel .-> OS
+    OS -. confirm / release .-> TS
+服务职责
+gateway-service
+对外统一入口
+根据路径转发到不同服务
+user-service
+用户信息查询
+乘车人信息管理
+校验乘车人与当前用户关系
+ticket-service
+查票
+Redis token 初始化与刷新
+购票预占 / 锁座
+支付成功后确认车票
+取消或超时后释放座位
+购票入口幂等控制
+order-service
+创建订单与订单明细
+支付订单
+取消订单
+发送延迟取消消息
+补偿任务记录与重试
+核心链路
+1. 查票
+根据 trainId + departure + arrival 查询站点序号
+找出目标区间覆盖的所有座位段 segment
+只有目标区间内所有 segment 都可用，才认为该物理座位可售
+最终按 seatType 聚合余票
+2. 下单 / 锁座
+校验乘车人信息
+Redis token 做前置拦截
+购票入口幂等拦截重复提交
+以 trainId + seatType 等维度加分布式锁
+在 MySQL 中选择可用座位段并更新为已占用
+写入 t_ticket
+调用 order-service 创建订单
+3. 支付确认
+order-service 更新订单状态为已支付
+事务提交后调用 ticket-service.confirm
+ticket-service 将对应车票状态改为已支付
+若确认失败，则记录补偿任务重试
+4. 超时取消
+创建订单成功后发送 RocketMQ 延迟消息
+到期仍未支付则消费取消逻辑
+order-service.cancelOrder 只允许 WAIT_PAY -> CANCELED
+事务提交后调用 ticket-service.release
+释放座位段并回收 token
+关键设计
+1. t_seat 区间段模型
+一个物理座位不会只存一行，而是按相邻站点拆成多个区间段。
+
+例如：
+
+01A 北京南 -> 济南西
+01A 济南西 -> 南京南
+01A 南京南 -> 杭州东
+01A 杭州东 -> 宁波
+这样做的价值：
+
+能表达区间售票，而不是只卖整趟车
+能复用不重叠区间的同一物理座位
+锁座时只更新目标区间对应的座位段
+2. 为什么不会超卖
+当前版本的核心判断是：
+
+Redis token：负责前置削峰，减少无效请求直接打到数据库
+分布式锁：减少同一车次同一座席类型下的并发冲突
+MySQL 条件更新：真正决定锁座是否成功
+也就是说，Redis 和锁负责优化并发，MySQL 才是最终真实库存。
+
+3. 购票入口幂等
+在 ticket-service 的购票入口增加幂等控制：
+
+根据用户购票请求生成唯一指纹
+Redis 中记录 PROCESSING / SUCCESS 状态
+重复请求不会再次进入锁座和下单逻辑
+这部分解决的是重复点击、网络重试、短时间重复请求问题。
+
+4. MQ 重复消费为什么要处理
+延迟取消消息可能重复投递。
+如果不处理，真正危险的不是“重复取消订单”，而是取消后面绑定的副作用：
+
+重复释放座位
+重复回补 token
+重复创建补偿任务
+当前做法是基于订单状态机幂等：
+
+只允许 WAIT_PAY -> CANCELED
+如果消息再次消费时订单已是 PAID 或 CANCELED，直接返回
+5. 为什么要做补偿任务
+例如下面这种情况：
+
+订单已经成功提交
+事务提交后发送延迟消息失败
+这时候订单已经落库，不能再回滚，只能补偿。
+所以会把未完成动作记到 t_compensation_task：
+
+记录 taskType
+记录 bizId(orderSn)
+记录 retryCount
+记录 nextRetryTime
+由定时任务异步重试，保证最终一致性。
+
+订单补偿流程图
+flowchart TD
+    A["createOrder 事务提交成功"] --> B["afterCommit 发送延迟取消消息"]
+    B --> C{"发送成功?"}
+
+    C -->|是| D["消息进入 Broker"]
+    D --> E["到期后消费者消费 cancelOrder"]
+    E --> F{"订单是否 WAIT_PAY?"}
+    F -->|是| G["取消订单并释放资源"]
+    F -->|否| H["直接返回"]
+
+    C -->|否| I["写入 t_compensation_task"]
+    I --> J["定时任务扫描待补偿任务"]
+    J --> K["查询订单当前状态"]
+    K --> L{"还需要补吗?"}
+    L -->|否| M["任务置 SUCCESS"]
+    L -->|是| N["按 orderTime 计算原始过期时间"]
+    N --> O{"是否已过期?"}
+    O -->|否| P["补发剩余延迟消息"]
+    O -->|是| Q["直接发送立即取消消息"]
+    P --> R{"发送成功?"}
+    Q --> S{"发送成功?"}
+    R -->|是| M
+    S -->|是| M
+    R -->|否| T["更新 retryCount / nextRetryTime"]
+    S -->|否| T
+    T --> U{"超过最大重试次数?"}
+    U -->|否| J
+    U -->|是| V["任务置 FAILED，等待人工处理"]
+项目里我重点做了什么
+设计并实现区间座位段模型与查票逻辑
+梳理购票主链路：查票、锁座、下单、支付确认、超时取消
+补充购票入口幂等
+完善 RocketMQ 延迟取消、重复消费安全处理和补偿任务
+分析 Redis token 与 MySQL 最终库存的职责边界
+当前边界
+当前版本已经能演示核心链路，但我也明确知道它的边界：
+
+当前下单编排仍偏前端驱动，不是标准聚合服务编排
+Redis token 方案还是较简化版本，区间粒度还有优化空间
+当前优先保证正确性，性能优化和更细粒度削峰仍可继续做
+后续优化
+用 Redis Hash + Lua 优化区间 token 的精细化扣减
+将下单编排进一步收口到服务端聚合层
+增加更完整的压测、监控与告警链路
+优化选座策略，支持更合理的多乘客邻座分配
+快速启动
+环境依赖
+JDK 17
+MySQL 8.x
+Redis
+RocketMQ
+Node.js 18+
+启动顺序
+执行 resources/db 下的建表 SQL
+启动 user-service
+启动 ticket-service
+启动 order-service
+启动 gateway-service
+启动 frontend
+默认入口
+网关：http://localhost:8080
+前端：http://localhost:5173
+适合面试展开的问题
+为什么区间购票不能只用一张简单座位表
+Redis token、分布式锁、MySQL 条件更新分别解决什么问题
+为什么 MySQL 才是最终真实库存
+MQ 为什么会重复消费，为什么不能忽略
+回滚和补偿有什么区别
+为什么补偿不能重新开始算一轮超时时间
