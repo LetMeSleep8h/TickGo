@@ -2,6 +2,7 @@ package com.eighthours.tickgo.order.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.eighthours.tickgo.order.dto.TicketOrderRequestDTO;
 import com.eighthours.tickgo.order.enums.OrderItemStatusEnum;
 import com.eighthours.tickgo.order.enums.OrderStatusEnum;
 import com.eighthours.tickgo.order.exception.BizException;
@@ -124,7 +125,7 @@ public class OrderServiceImpl implements OrderService {
             @Override
             public void afterCommit() {
                 try {
-                    Result<Void> result = ticketServiceClient.confirmTickets(orderSn);
+                    Result<Void> result = ticketServiceClient.confirmTickets(new TicketOrderRequestDTO(orderSn));
                     if (result.getCode() != 200) {
                         log.warn("支付后确认车票失败，orderSn={}, 开始补偿", orderSn);
                         compensationService.createCompensationTask(
@@ -173,7 +174,7 @@ public class OrderServiceImpl implements OrderService {
             @Override
             public void afterCommit() {
                 try {
-                    Result<Void> result = ticketServiceClient.releaseSeats(orderSn);
+                    Result<Void> result = ticketServiceClient.releaseSeats(new TicketOrderRequestDTO(orderSn));
                     if (result.getCode() != 200) {
                         log.warn("取消后释放座位失败，orderSn={}, 开始补偿", orderSn);
                         compensationService.createCompensationTask(

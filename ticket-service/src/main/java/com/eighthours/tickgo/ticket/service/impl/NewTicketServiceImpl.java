@@ -2,6 +2,8 @@ package com.eighthours.tickgo.ticket.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.eighthours.tickgo.ticket.common.Result;
+import com.eighthours.tickgo.ticket.dto.CreateTicketOrderReqDTO;
 import com.eighthours.tickgo.ticket.dto.NewTicketOrderReqDTO;
 import com.eighthours.tickgo.ticket.dto.NewTicketPurchaseReqDTO;
 import com.eighthours.tickgo.ticket.dto.SeatItemDTO;
@@ -14,6 +16,7 @@ import com.eighthours.tickgo.ticket.entity.TrainDO;
 import com.eighthours.tickgo.ticket.entity.TrainStationDO;
 import com.eighthours.tickgo.ticket.enums.TicketStatusEnum;
 import com.eighthours.tickgo.ticket.exception.BizException;
+import com.eighthours.tickgo.ticket.feign.OrderServiceClient;
 import com.eighthours.tickgo.ticket.mapper.SeatMapper;
 import com.eighthours.tickgo.ticket.mapper.TicketMapper;
 import com.eighthours.tickgo.ticket.mapper.TrainMapper;
@@ -37,12 +40,14 @@ import java.util.stream.Collectors;
 public class NewTicketServiceImpl implements NewTicketService {
 
     private static final String USERNAME = "admin";
+    private static final Long USER_ID = 1L;
 
     private final TrainStationMapper trainStationMapper;
     private final TrainMapper trainMapper;
     private final SeatMapper seatMapper;
     private final TicketMapper ticketMapper;
     private final RedissonClient redissonClient;
+    private final OrderServiceClient orderServiceClient;
 
     @Override
     public TicketQueryRespDTO queryRemainTicket(Long trainId, String departure, String arrival) {
@@ -73,7 +78,19 @@ public class NewTicketServiceImpl implements NewTicketService {
                 }
                 lockList.add(lock);
             }
-            return executePurchaseTickets(request);
+            SeatPreOccupyRespDTO purchaseResp = executePurchaseTickets(request);
+            Result<Void> createOrderResult;
+            try {
+                createOrderResult = orderServiceClient.createOrder(buildCreateOrderRequest(request, purchaseResp));
+            } catch (Exception ex) {
+                releaseSeats(buildOrderRequest(request.getOrderSn()));
+                throw new BizException("订单服务调用失败");
+            }
+            if (createOrderResult == null || createOrderResult.getCode() != 200) {
+                releaseSeats(buildOrderRequest(request.getOrderSn()));
+                throw new BizException(createOrderResult == null ? "订单服务调用失败" : createOrderResult.getMessage());
+            }
+            return purchaseResp;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new BizException("购票过程被中断，请稍后重试");
@@ -309,6 +326,38 @@ public class NewTicketServiceImpl implements NewTicketService {
 
     private String buildPurchaseLockKey(Long trainId, String departure, String arrival, Integer seatType) {
         return "ticket:purchase:lock:" + trainId + ":" + departure + ":" + arrival + ":" + seatType;
+    }
+
+    private NewTicketOrderReqDTO buildOrderRequest(String orderSn) {
+        NewTicketOrderReqDTO request = new NewTicketOrderReqDTO();
+        request.setOrderSn(orderSn);
+        return request;
+    }
+
+    private CreateTicketOrderReqDTO buildCreateOrderRequest(NewTicketPurchaseReqDTO request,
+                                                            SeatPreOccupyRespDTO purchaseResp) {
+        CreateTicketOrderReqDTO createOrderReq = new CreateTicketOrderReqDTO();
+        createOrderReq.setOrderSn(request.getOrderSn());
+        createOrderReq.setUserId(USER_ID);
+        createOrderReq.setUsername(USERNAME);
+        createOrderReq.setTrainId(request.getTrainId());
+        createOrderReq.setTrainNumber(purchaseResp.getTrainNumber());
+        createOrderReq.setDeparture(request.getDeparture());
+        createOrderReq.setArrival(request.getArrival());
+        createOrderReq.setItems(purchaseResp.getItems().stream()
+                .map(this::buildOrderItem)
+                .toList());
+        return createOrderReq;
+    }
+
+    private CreateTicketOrderReqDTO.OrderItemDTO buildOrderItem(SeatItemDTO item) {
+        CreateTicketOrderReqDTO.OrderItemDTO orderItem = new CreateTicketOrderReqDTO.OrderItemDTO();
+        orderItem.setPassengerId(item.getPassengerId());
+        orderItem.setSeatType(item.getSeatType());
+        orderItem.setCarriageNumber(item.getCarriageNumber());
+        orderItem.setSeatNumber(item.getSeatNumber());
+        orderItem.setAmount(item.getAmount());
+        return orderItem;
     }
 
     private String physicalSeatKey(SeatDO seat) {
