@@ -7,6 +7,8 @@ import java.util.List;
 @Data
 public class NewTicketPurchaseReqDTO {
 
+    private Long userId;
+
     private Long trainId;
 
     private String departure;

@@ -17,6 +17,7 @@ import com.eighthours.tickgo.ticket.entity.TrainStationDO;
 import com.eighthours.tickgo.ticket.enums.TicketStatusEnum;
 import com.eighthours.tickgo.ticket.exception.BizException;
 import com.eighthours.tickgo.ticket.feign.OrderServiceClient;
+import com.eighthours.tickgo.ticket.idempotent.Idempotent;
 import com.eighthours.tickgo.ticket.mapper.SeatMapper;
 import com.eighthours.tickgo.ticket.mapper.TicketMapper;
 import com.eighthours.tickgo.ticket.mapper.TrainMapper;
@@ -40,7 +41,6 @@ import java.util.stream.Collectors;
 public class NewTicketServiceImpl implements NewTicketService {
 
     private static final String USERNAME = "admin";
-    private static final Long USER_ID = 1L;
 
     private final TrainStationMapper trainStationMapper;
     private final TrainMapper trainMapper;
@@ -64,6 +64,7 @@ public class NewTicketServiceImpl implements NewTicketService {
     }
 
     @Override
+    @Idempotent(prefix = "ticket:purchase")
     public SeatPreOccupyRespDTO purchaseTicketsV2(NewTicketPurchaseReqDTO request) {
         Map<Integer, List<NewTicketPurchaseReqDTO.PassengerDTO>> seatTypeMap = request.getPassengers().stream()
                 .collect(Collectors.groupingBy(NewTicketPurchaseReqDTO.PassengerDTO::getSeatType));
@@ -338,7 +339,7 @@ public class NewTicketServiceImpl implements NewTicketService {
                                                             SeatPreOccupyRespDTO purchaseResp) {
         CreateTicketOrderReqDTO createOrderReq = new CreateTicketOrderReqDTO();
         createOrderReq.setOrderSn(request.getOrderSn());
-        createOrderReq.setUserId(USER_ID);
+        createOrderReq.setUserId(request.getUserId());
         createOrderReq.setUsername(USERNAME);
         createOrderReq.setTrainId(request.getTrainId());
         createOrderReq.setTrainNumber(purchaseResp.getTrainNumber());
