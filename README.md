@@ -1,6 +1,3 @@
-下面是删完后的最终版：
-
-```markdown
 # TickGo
 
 > 参考 12306 场景实现的区间购票与订单补偿系统，聚焦区间库存建模、并发锁座、防超卖、延迟取消、重复消费幂等与补偿重试。
@@ -39,6 +36,24 @@
 ## 系统架构
 
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {
+  'background': '#ffffff',
+  'primaryColor': '#ffffff',
+  'primaryTextColor': '#000000',
+  'primaryBorderColor': '#000000',
+  'secondaryColor': '#ffffff',
+  'secondaryTextColor': '#000000',
+  'secondaryBorderColor': '#000000',
+  'tertiaryColor': '#ffffff',
+  'tertiaryTextColor': '#000000',
+  'tertiaryBorderColor': '#000000',
+  'lineColor': '#000000',
+  'textColor': '#000000',
+  'mainBkg': '#ffffff',
+  'nodeBorder': '#000000',
+  'clusterBkg': '#ffffff',
+  'clusterBorder': '#000000'
+}}}%%
 flowchart LR
     FE["Frontend / Vue3"] --> GW["gateway-service"]
     GW --> US["user-service"]
@@ -193,6 +208,24 @@ flowchart LR
 ## 订单补偿流程图
 
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {
+  'background': '#ffffff',
+  'primaryColor': '#ffffff',
+  'primaryTextColor': '#000000',
+  'primaryBorderColor': '#000000',
+  'secondaryColor': '#ffffff',
+  'secondaryTextColor': '#000000',
+  'secondaryBorderColor': '#000000',
+  'tertiaryColor': '#ffffff',
+  'tertiaryTextColor': '#000000',
+  'tertiaryBorderColor': '#000000',
+  'lineColor': '#000000',
+  'textColor': '#000000',
+  'mainBkg': '#ffffff',
+  'nodeBorder': '#000000',
+  'clusterBkg': '#ffffff',
+  'clusterBorder': '#000000'
+}}}%%
 flowchart TD
     A["createOrder 事务提交成功"] --> B["afterCommit 发送延迟取消消息"]
     B --> C{"发送成功?"}
@@ -253,4 +286,3 @@ flowchart TD
 
 - 网关：`http://localhost:8080`
 - 前端：`http://localhost:5173`
-```
