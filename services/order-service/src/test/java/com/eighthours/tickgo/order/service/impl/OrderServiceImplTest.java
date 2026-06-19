@@ -85,10 +85,9 @@ class OrderServiceImplTest {
         when(orderMapper.selectOne(any()))
                 .thenReturn(paidOrder)
                 .thenReturn(canceledOrder);
-        when(orderMapper.update(any(), any())).thenReturn(0);
 
         assertDoesNotThrow(() -> orderService.cancelOrder("ORD-2"));
-        verify(orderItemMapper).update(any(), any());
+        verify(orderItemMapper, never()).update(any(), any());
     }
 
     @Test
@@ -119,21 +118,15 @@ class OrderServiceImplTest {
     }
 
     @Test
-    void cancelOrderShouldAllowPaidOrderRefundAndReleaseTicket() {
-        TransactionSynchronizationManager.initSynchronization();
-        try {
-            OrderDO paidOrder = buildOrder(OrderStatusEnum.PAID.getCode());
-            paidOrder.setOrderSn("ORD-PAID");
-            when(orderMapper.selectOne(any())).thenReturn(paidOrder);
-            when(orderMapper.update(any(), any())).thenReturn(1);
+    void cancelOrderShouldIgnorePaidOrderForDelayMessageConsume() {
+        OrderDO paidOrder = buildOrder(OrderStatusEnum.PAID.getCode());
+        paidOrder.setOrderSn("ORD-PAID");
+        when(orderMapper.selectOne(any())).thenReturn(paidOrder);
 
-            assertDoesNotThrow(() -> orderService.cancelOrder("ORD-PAID"));
+        assertDoesNotThrow(() -> orderService.cancelOrder("ORD-PAID"));
 
-            verify(orderItemMapper).update(any(), any());
-            verify(orderMapper).update(any(), any());
-        } finally {
-            TransactionSynchronizationManager.clearSynchronization();
-        }
+        verify(orderItemMapper, never()).update(any(), any());
+        verify(orderMapper, never()).update(any(), any());
     }
 
     @Test

@@ -170,14 +170,15 @@ public class OrderServiceImpl implements OrderService {
         if (OrderStatusEnum.CANCELED.getCode().equals(order.getStatus())) {
             return;
         }
-        if (!OrderStatusEnum.WAIT_PAY.getCode().equals(order.getStatus())
-                && !OrderStatusEnum.PAID.getCode().equals(order.getStatus())) {
+        if (OrderStatusEnum.PAID.getCode().equals(order.getStatus())) {
+            log.info("订单已支付，忽略延迟取消消息，orderSn={}", orderSn);
+            return;
+        }
+        if (!OrderStatusEnum.WAIT_PAY.getCode().equals(order.getStatus())) {
             throw new BizException("订单状态异常，不能取消");
         }
         Integer currentOrderStatus = order.getStatus();
-        Integer currentOrderItemStatus = OrderStatusEnum.PAID.getCode().equals(currentOrderStatus)
-                ? OrderItemStatusEnum.PAID.getCode()
-                : OrderItemStatusEnum.WAIT_PAY.getCode();
+        Integer currentOrderItemStatus = OrderItemStatusEnum.WAIT_PAY.getCode();
 
         orderItemMapper.update(null,
                 new LambdaUpdateWrapper<OrderItemDO>()
