@@ -2,12 +2,29 @@ import { ref, watch } from 'vue'
 import type { RecentOrder, FrontendOrderStatus } from '../types/api'
 import { RECENT_ORDER_KEY } from '../constants/stations'
 
+function normalizeOrder(order: Partial<RecentOrder> | null): RecentOrder | null {
+  if (!order || !order.orderSn) {
+    return null
+  }
+  return {
+    orderSn: order.orderSn,
+    trainId: order.trainId ?? 0,
+    trainNumber: order.trainNumber ?? '',
+    departure: order.departure ?? '',
+    arrival: order.arrival ?? '',
+    userId: order.userId ?? 0,
+    username: order.username ?? '',
+    items: order.items ?? [],
+    frontendOrderStatus: order.frontendOrderStatus ?? 'PENDING'
+  }
+}
+
 // Load from localStorage
 function loadFromStorage(): RecentOrder | null {
   try {
     const stored = localStorage.getItem(RECENT_ORDER_KEY)
     if (stored) {
-      return JSON.parse(stored)
+      return normalizeOrder(JSON.parse(stored))
     }
   } catch {
     // ignore parse errors
@@ -37,7 +54,7 @@ export function useRecentOrder() {
   }, { deep: true })
 
   function setRecentOrder(order: RecentOrder) {
-    recentOrder.value = order
+    recentOrder.value = normalizeOrder(order)
   }
 
   function updateOrderStatus(status: FrontendOrderStatus) {

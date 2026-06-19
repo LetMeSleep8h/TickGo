@@ -1,0 +1,334 @@
+package com.eighthours.tickgo.ticket.service.impl;
+
+import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import com.eighthours.tickgo.ticket.common.Result;
+import com.eighthours.tickgo.ticket.dto.CreateTicketOrderReqDTO;
+import com.eighthours.tickgo.ticket.dto.NewTicketOrderReqDTO;
+import com.eighthours.tickgo.ticket.dto.NewTicketPurchaseReqDTO;
+import com.eighthours.tickgo.ticket.dto.SeatPreOccupyRespDTO;
+import com.eighthours.tickgo.ticket.dto.TicketQueryRespDTO;
+import com.eighthours.tickgo.ticket.entity.SeatDO;
+import com.eighthours.tickgo.ticket.entity.TicketDO;
+import com.eighthours.tickgo.ticket.entity.TrainDO;
+import com.eighthours.tickgo.ticket.entity.TrainStationDO;
+import com.eighthours.tickgo.ticket.enums.TicketStatusEnum;
+import com.eighthours.tickgo.ticket.exception.BizException;
+import com.eighthours.tickgo.ticket.feign.OrderServiceClient;
+import com.eighthours.tickgo.ticket.idempotent.PurchaseBusinessStateChecker;
+import com.eighthours.tickgo.ticket.mapper.SeatMapper;
+import com.eighthours.tickgo.ticket.mapper.TicketMapper;
+import com.eighthours.tickgo.ticket.mapper.TrainMapper;
+import com.eighthours.tickgo.ticket.mapper.TrainStationMapper;
+import org.apache.ibatis.builder.MapperBuilderAssistant;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
+
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(MockitoExtension.class)
+class NewTicketServiceImplTest {
+
+    @BeforeAll
+    static void initTableInfo() {
+        MapperBuilderAssistant assistant = new MapperBuilderAssistant(new MybatisConfiguration(), "");
+        TableInfoHelper.initTableInfo(assistant, SeatDO.class);
+        TableInfoHelper.initTableInfo(assistant, TrainStationDO.class);
+        TableInfoHelper.initTableInfo(assistant, TrainDO.class);
+        TableInfoHelper.initTableInfo(assistant, TicketDO.class);
+    }
+
+    @Mock
+    private TrainStationMapper trainStationMapper;
+    @Mock
+    private TrainMapper trainMapper;
+    @Mock
+    private SeatMapper seatMapper;
+    @Mock
+    private TicketMapper ticketMapper;
+    @Mock
+    private RedissonClient redissonClient;
+    @Mock
+    private RLock lock;
+    @Mock
+    private RLock passengerLock;
+    @Mock
+    private OrderServiceClient orderServiceClient;
+    @Mock
+    private PurchaseBusinessStateChecker purchaseBusinessStateChecker;
+
+    @Test
+    void purchaseTicketsV2_shouldCreateOrderAfterLocalSeatAndTicketReservation() throws Exception {
+        when(trainStationMapper.selectOne(any()))
+                .thenReturn(buildStation("北京南", 1))
+                .thenReturn(buildStation("杭州东", 4));
+        TrainDO train = new TrainDO();
+        train.setId(1L);
+        train.setTrainNumber("G1001");
+        when(trainMapper.selectById(1L)).thenReturn(train);
+        when(redissonClient.getLock("ticket:purchase:passenger:1:1001")).thenReturn(passengerLock);
+        when(passengerLock.tryLock(3, 10, TimeUnit.SECONDS)).thenReturn(true);
+        when(passengerLock.isHeldByCurrentThread()).thenReturn(true);
+        when(redissonClient.getLock("ticket:purchase:lock:1:北京南:杭州东:1")).thenReturn(lock);
+        when(lock.tryLock(3, 10, TimeUnit.SECONDS)).thenReturn(true);
+        when(lock.isHeldByCurrentThread()).thenReturn(true);
+        when(seatMapper.selectList(any())).thenReturn(buildSeatSegments());
+        when(seatMapper.update(any(), any())).thenReturn(3);
+        when(orderServiceClient.createOrder(any())).thenReturn(Result.success());
+
+        NewTicketServiceImpl service = new NewTicketServiceImpl(
+                trainStationMapper, trainMapper, seatMapper, ticketMapper, redissonClient, orderServiceClient, purchaseBusinessStateChecker);
+
+        SeatPreOccupyRespDTO result = service.purchaseTicketsV2(buildPurchaseRequest());
+
+        assertEquals("G1001", result.getTrainNumber());
+        assertEquals(1, result.getItems().size());
+        assertEquals("01", result.getItems().get(0).getCarriageNumber());
+        assertEquals("01A", result.getItems().get(0).getSeatNumber());
+        ArgumentCaptor<TicketDO> ticketCaptor = ArgumentCaptor.forClass(TicketDO.class);
+        verify(ticketMapper).insert(ticketCaptor.capture());
+        TicketDO saved = ticketCaptor.getValue();
+        assertEquals("order-1", saved.getOrderSn());
+        assertEquals(Long.valueOf(1001L), saved.getPassengerId());
+        assertEquals(TicketStatusEnum.WAIT_PAY.getCode(), saved.getTicketStatus());
+        ArgumentCaptor<CreateTicketOrderReqDTO> orderCaptor = ArgumentCaptor.forClass(CreateTicketOrderReqDTO.class);
+        verify(orderServiceClient).createOrder(orderCaptor.capture());
+        CreateTicketOrderReqDTO createOrderReq = orderCaptor.getValue();
+        assertEquals("order-1", createOrderReq.getOrderSn());
+        assertEquals("G1001", createOrderReq.getTrainNumber());
+        assertEquals(1, createOrderReq.getItems().size());
+        verify(passengerLock).unlock();
+        verify(lock).unlock();
+    }
+
+    @Test
+    void purchaseTicketsV2_shouldReleaseLocalResourcesWhenCreateOrderFails() throws Exception {
+        when(trainStationMapper.selectOne(any()))
+                .thenReturn(buildStation("北京南", 1))
+                .thenReturn(buildStation("杭州东", 4))
+                .thenReturn(buildStation("北京南", 1))
+                .thenReturn(buildStation("杭州东", 4));
+        TrainDO train = new TrainDO();
+        train.setId(1L);
+        train.setTrainNumber("G1001");
+        when(trainMapper.selectById(1L)).thenReturn(train);
+        when(redissonClient.getLock("ticket:purchase:passenger:1:1001")).thenReturn(passengerLock);
+        when(passengerLock.tryLock(3, 10, TimeUnit.SECONDS)).thenReturn(true, true);
+        when(passengerLock.isHeldByCurrentThread()).thenReturn(true);
+        when(redissonClient.getLock("ticket:purchase:lock:1:北京南:杭州东:1")).thenReturn(lock);
+        when(lock.tryLock(3, 10, TimeUnit.SECONDS)).thenReturn(true, true);
+        when(lock.isHeldByCurrentThread()).thenReturn(true);
+        when(seatMapper.selectList(any())).thenReturn(buildSeatSegments());
+        when(seatMapper.update(any(), any())).thenReturn(3);
+        when(orderServiceClient.createOrder(any())).thenReturn(Result.error("create failed"));
+        TicketDO ticket = new TicketDO();
+        ticket.setId(10L);
+        ticket.setTrainId(1L);
+        ticket.setDeparture("北京南");
+        ticket.setArrival("杭州东");
+        ticket.setOrderSn("order-1");
+        ticket.setSeatType(1);
+        ticket.setCarriageNumber("01");
+        ticket.setSeatNumber("01A");
+        ticket.setTicketStatus(TicketStatusEnum.WAIT_PAY.getCode());
+        when(ticketMapper.selectList(any())).thenReturn(List.of(ticket));
+        when(ticketMapper.update(any(), any())).thenReturn(1);
+
+        NewTicketServiceImpl service = new NewTicketServiceImpl(
+                trainStationMapper, trainMapper, seatMapper, ticketMapper, redissonClient, orderServiceClient, purchaseBusinessStateChecker);
+
+        org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class, () -> service.purchaseTicketsV2(buildPurchaseRequest()));
+
+        verify(orderServiceClient).createOrder(any());
+        verify(ticketMapper).selectList(any());
+        verify(ticketMapper).update(any(), any());
+        verify(seatMapper, times(2)).update(any(), any());
+    }
+
+    @Test
+    void confirmAndRelease_shouldUpdateTicketStatusAndUnlockSeatSegments() throws Exception {
+        TicketDO ticket = new TicketDO();
+        ticket.setId(10L);
+        ticket.setTrainId(1L);
+        ticket.setDeparture("北京南");
+        ticket.setArrival("杭州东");
+        ticket.setOrderSn("order-2");
+        ticket.setSeatType(1);
+        ticket.setCarriageNumber("01");
+        ticket.setSeatNumber("01A");
+        ticket.setTicketStatus(TicketStatusEnum.WAIT_PAY.getCode());
+        when(ticketMapper.selectList(any())).thenReturn(List.of(ticket));
+        when(trainStationMapper.selectOne(any()))
+                .thenReturn(buildStation("北京南", 1))
+                .thenReturn(buildStation("杭州东", 4));
+        when(redissonClient.getLock("ticket:purchase:lock:1:北京南:杭州东:1")).thenReturn(lock);
+        when(lock.tryLock(3, 10, TimeUnit.SECONDS)).thenReturn(true);
+        when(lock.isHeldByCurrentThread()).thenReturn(true);
+        when(seatMapper.update(any(), any())).thenReturn(3);
+        when(ticketMapper.update(any(), any())).thenReturn(1);
+
+        NewTicketServiceImpl service = new NewTicketServiceImpl(
+                trainStationMapper, trainMapper, seatMapper, ticketMapper, redissonClient, orderServiceClient, purchaseBusinessStateChecker);
+
+        NewTicketOrderReqDTO request = new NewTicketOrderReqDTO();
+        request.setOrderSn("order-2");
+        service.confirmTickets(request);
+        service.releaseSeats(request);
+
+        verify(ticketMapper, times(2)).selectList(any());
+        verify(ticketMapper, times(2)).update(any(), any());
+        verify(seatMapper).update(any(), any());
+        verify(lock).unlock();
+    }
+
+    @Test
+    void releaseSeats_shouldReleasePaidTicketsForRefund() throws Exception {
+        TicketDO ticket = new TicketDO();
+        ticket.setId(11L);
+        ticket.setTrainId(1L);
+        ticket.setDeparture("北京南");
+        ticket.setArrival("杭州东");
+        ticket.setOrderSn("order-paid");
+        ticket.setSeatType(1);
+        ticket.setCarriageNumber("01");
+        ticket.setSeatNumber("01A");
+        ticket.setTicketStatus(TicketStatusEnum.PAID.getCode());
+        when(ticketMapper.selectList(any())).thenReturn(List.of(ticket));
+        when(trainStationMapper.selectOne(any()))
+                .thenReturn(buildStation("北京南", 1))
+                .thenReturn(buildStation("杭州东", 4));
+        when(redissonClient.getLock("ticket:purchase:lock:1:北京南:杭州东:1")).thenReturn(lock);
+        when(lock.tryLock(3, 10, TimeUnit.SECONDS)).thenReturn(true);
+        when(lock.isHeldByCurrentThread()).thenReturn(true);
+        when(seatMapper.update(any(), any())).thenReturn(3);
+        when(ticketMapper.update(any(), any())).thenReturn(1);
+
+        NewTicketServiceImpl service = new NewTicketServiceImpl(
+                trainStationMapper, trainMapper, seatMapper, ticketMapper, redissonClient, orderServiceClient, purchaseBusinessStateChecker);
+
+        NewTicketOrderReqDTO request = new NewTicketOrderReqDTO();
+        request.setOrderSn("order-paid");
+        service.releaseSeats(request);
+
+        verify(ticketMapper).selectList(any());
+        verify(ticketMapper).update(any(), any());
+        verify(seatMapper).update(any(), any());
+        verify(lock).unlock();
+    }
+
+    @Test
+    void queryRemainTicket_shouldCountPhysicalSeatsByInterval() {
+        when(trainStationMapper.selectOne(any()))
+                .thenReturn(buildStation("北京南", 1))
+                .thenReturn(buildStation("杭州东", 4));
+        when(seatMapper.selectList(any())).thenReturn(buildSeatSegments());
+
+        NewTicketServiceImpl service = new NewTicketServiceImpl(
+                trainStationMapper, trainMapper, seatMapper, ticketMapper, redissonClient, orderServiceClient, purchaseBusinessStateChecker);
+
+        TicketQueryRespDTO result = service.queryRemainTicket(1L, "北京南", "杭州东");
+
+        assertNotNull(result);
+        assertEquals(1, result.getSeatTypeRemains().size());
+        assertEquals(1L, result.getSeatTypeRemains().get(0).getRemainCount());
+    }
+
+    @Test
+    void purchaseTicketsV2_shouldRejectDuplicateActiveTicketForSamePassengerAndTrain() {
+        when(redissonClient.getLock("ticket:purchase:passenger:1:1001")).thenReturn(passengerLock);
+        try {
+            when(passengerLock.tryLock(3, 10, TimeUnit.SECONDS)).thenReturn(true);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+        when(passengerLock.isHeldByCurrentThread()).thenReturn(true);
+        doThrow(new BizException("乘车人存在待支付订单，passengerId=1001"))
+                .when(purchaseBusinessStateChecker)
+                .check(any());
+
+        NewTicketServiceImpl service = new NewTicketServiceImpl(
+                trainStationMapper, trainMapper, seatMapper, ticketMapper, redissonClient, orderServiceClient, purchaseBusinessStateChecker);
+
+        BizException exception = assertThrows(BizException.class, () -> service.purchaseTicketsV2(buildPurchaseRequest()));
+
+        assertEquals("乘车人存在待支付订单，passengerId=1001", exception.getMessage());
+        verify(orderServiceClient, never()).createOrder(any());
+        verify(ticketMapper, never()).insert(org.mockito.ArgumentMatchers.<TicketDO>any());
+        verify(passengerLock).unlock();
+    }
+
+    @Test
+    void purchaseTicketsV2_shouldFailWhenPassengerLockCannotBeAcquired() throws Exception {
+        when(redissonClient.getLock("ticket:purchase:passenger:1:1001")).thenReturn(passengerLock);
+        when(passengerLock.tryLock(3, 10, TimeUnit.SECONDS)).thenReturn(false);
+
+        NewTicketServiceImpl service = new NewTicketServiceImpl(
+                trainStationMapper, trainMapper, seatMapper, ticketMapper, redissonClient, orderServiceClient, purchaseBusinessStateChecker);
+
+        assertThrows(BizException.class, () -> service.purchaseTicketsV2(buildPurchaseRequest()));
+
+        verify(ticketMapper, never()).selectList(any());
+        verify(orderServiceClient, never()).createOrder(any());
+    }
+
+    private NewTicketPurchaseReqDTO buildPurchaseRequest() {
+        NewTicketPurchaseReqDTO request = new NewTicketPurchaseReqDTO();
+        request.setUserId(1L);
+        request.setTrainId(1L);
+        request.setDeparture("北京南");
+        request.setArrival("杭州东");
+        request.setOrderSn("order-1");
+        NewTicketPurchaseReqDTO.PassengerDTO passenger = new NewTicketPurchaseReqDTO.PassengerDTO();
+        passenger.setPassengerId(1001L);
+        passenger.setSeatType(1);
+        request.setPassengers(List.of(passenger));
+        return request;
+    }
+
+    private List<SeatDO> buildSeatSegments() {
+        return List.of(
+                buildSeatSegment("北京南", "济南西", 1, 2),
+                buildSeatSegment("济南西", "南京南", 2, 3),
+                buildSeatSegment("南京南", "杭州东", 3, 4));
+    }
+
+    private SeatDO buildSeatSegment(String startStation, String endStation, int startSequence, int endSequence) {
+        SeatDO seat = new SeatDO();
+        seat.setTrainId(1L);
+        seat.setCarriageNumber("01");
+        seat.setSeatNumber("01A");
+        seat.setSeatType(1);
+        seat.setStartStation(startStation);
+        seat.setEndStation(endStation);
+        seat.setStartSequence(startSequence);
+        seat.setEndSequence(endSequence);
+        seat.setPrice(100);
+        seat.setSeatStatus(0);
+        return seat;
+    }
+
+    private TrainStationDO buildStation(String stationName, Integer sequenceNo) {
+        TrainStationDO station = new TrainStationDO();
+        station.setTrainId(1L);
+        station.setStationName(stationName);
+        station.setSequenceNo(sequenceNo);
+        return station;
+    }
+}

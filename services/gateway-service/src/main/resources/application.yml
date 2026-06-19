@@ -1,0 +1,35 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: gateway-service
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            - id: user-service
+              uri: http://localhost:8084
+              predicates:
+                - Path=/api/user/**
+              filters:
+                - StripPrefix=1
+            - id: ticket-service
+              uri: http://localhost:8082
+              predicates:
+                - Path=/api/ticket/**
+              filters:
+                - StripPrefix=1
+            - id: order-service
+              uri: http://localhost:8083
+              predicates:
+                - Path=/api/order/**
+              filters:
+                - StripPrefix=1
+            - id: pay-service
+              uri: http://localhost:8085
+              predicates:
+                - Path=/api/pay/**
+              filters:
+                - StripPrefix=1

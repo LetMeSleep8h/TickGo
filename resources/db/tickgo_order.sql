@@ -4,6 +4,7 @@ CREATE DATABASE IF NOT EXISTS tickgo_order
 
 USE tickgo_order;
 
+DROP TABLE IF EXISTS t_compensation_task;
 DROP TABLE IF EXISTS t_order_item;
 DROP TABLE IF EXISTS t_order;
 

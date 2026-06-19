@@ -12,6 +12,13 @@ export interface UserInfo {
   realName: string
 }
 
+export interface TrainOption {
+  trainId: number
+  trainNumber: string
+  startStation: string
+  endStation: string
+}
+
 export interface Passenger {
   id: number
   realName: string
@@ -32,6 +39,7 @@ export interface TicketQueryResponse {
 }
 
 export interface PreOccupyRequest {
+  userId: number
   trainId: number
   departure: string
   arrival: string
@@ -87,6 +95,42 @@ export interface RecentOrder {
   username: string
   items: OrderItem[]
   frontendOrderStatus: FrontendOrderStatus
+}
+
+export interface OrderStatusResponse {
+  orderSn: string
+  status: number
+}
+
+export interface OrderListItem {
+  passengerName: string
+  seatType: number
+  carriageNumber: string
+  seatNumber: string
+  amount: number
+}
+
+export interface OrderDetail {
+  orderSn: string
+  userId: number
+  username: string
+  trainId: number
+  trainNumber: string
+  departure: string
+  arrival: string
+  status: number
+  orderTime?: string
+  expireTime?: string
+  items: OrderListItem[]
+}
+
+export interface PaymentStatusResponse {
+  paymentSn: string
+  orderSn: string
+  status: number
+  callbackStatus: number
+  payAmount: number
+  successTime?: string
 }
 
 // Validate passengers request

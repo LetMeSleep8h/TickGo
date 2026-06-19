@@ -1,6 +1,8 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import LabPage from '../views/LabPage.vue'
 import TicketPage from '../views/TicketPage.vue'
 import OrderPage from '../views/OrderPage.vue'
+import PayDebugPage from '../views/PayDebugPage.vue'
 import UserPage from '../views/UserPage.vue'
 
 const router = createRouter({
@@ -8,7 +10,12 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      redirect: '/ticket'
+      redirect: '/lab'
+    },
+    {
+      path: '/lab',
+      name: 'lab',
+      component: LabPage
     },
     {
       path: '/ticket',
@@ -19,6 +26,11 @@ const router = createRouter({
       path: '/order',
       name: 'order',
       component: OrderPage
+    },
+    {
+      path: '/pay',
+      name: 'pay',
+      component: PayDebugPage
     },
     {
       path: '/user',

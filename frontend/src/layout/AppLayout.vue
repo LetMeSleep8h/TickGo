@@ -29,8 +29,10 @@ const { recentOrder } = useRecentOrder()
 const currentMenu = ref<string[]>([route.name as string])
 
 const menuItems = [
+  { key: 'lab', label: '联调台' },
   { key: 'ticket', label: '购票' },
   { key: 'order', label: '订单' },
+  { key: 'pay', label: '支付' },
   { key: 'user', label: '用户' }
 ]
 
