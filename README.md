@@ -1,4 +1,4 @@
-# TickGo
+# TickGo/高并发分布式购票系统
 
 > 基于 Spring Boot、Spring Cloud、MySQL、Redis、Redisson、RocketMQ 实现的分布式购票系统，聚焦区间余票查询、并发锁座、防超卖、延迟取消与订单补偿。
 
